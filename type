@@ -1,4 +1,4 @@
-#!/usr/bin/env ty
+#!./bin/ty
 
 import apple (..)
 import soundio (..)

@@ -1,0 +1,240 @@
+#!/usr/bin/env ty
+
+import apple (..)
+import soundio (..)
+import clap (clap!)
+import path (Path)
+import json
+import ffi as c
+import os (signal, SIGINT, SIGTERM, exit)
+import log (..)
+
+logging({level: INFO})
+
+let SAMPLE_RATE = 44100
+
+let WEB_KEY_TO_MAC = %{
+    'KeyA': 0,   'KeyS': 1,   'KeyD': 2,   'KeyF': 3,   'KeyH': 4,
+    'KeyG': 5,   'KeyZ': 6,   'KeyX': 7,   'KeyC': 8,   'KeyV': 9,
+    'KeyB': 11,  'KeyQ': 12,  'KeyW': 13,  'KeyE': 14,  'KeyR': 15,
+    'KeyY': 16,  'KeyT': 17,  'KeyI': 34,  'KeyU': 32,  'KeyP': 35,
+    'KeyO': 31,  'KeyL': 37,  'KeyJ': 38,  'KeyK': 40,  'KeyN': 45,
+    'KeyM': 46,
+    'Digit1': 18, 'Digit2': 19, 'Digit3': 20, 'Digit4': 21, 'Digit5': 23,
+    'Digit6': 22, 'Digit7': 26, 'Digit8': 28, 'Digit9': 25, 'Digit0': 29,
+    'Enter': 36,     'Escape': 53,    'Backspace': 51, 'Tab': 9,
+    'Space': 49,     'Minus': 27,     'Equal': 24,
+    'BracketLeft': 33, 'BracketRight': 30,
+    'Backslash': 42, 'Semicolon': 41, 'Quote': 39,
+    'Backquote': 50, 'Comma': 43,     'Period': 47,   'Slash': 44,
+    'CapsLock': 57,
+    'F1': 122, 'F2': 120, 'F3': 99,  'F4': 118,
+    'F5': 96,  'F6': 97,  'F7': 98,  'F8': 100,
+    'F9': 101, 'F10': 109, 'F11': 103, 'F12': 111,
+    'ShiftLeft': 56,   'ShiftRight': 60,
+    'ControlLeft': 59, 'AltLeft': 58,
+    'Delete': 117,     'End': 119,    'Home': 115,
+    'PageUp': 116,     'PageDown': 121,
+    'ArrowLeft': 123,  'ArrowRight': 124,
+    'ArrowDown': 125,  'ArrowUp': 126,
+    'NumLock': 71,
+    'NumpadDivide': 75,   'NumpadMultiply': 67,
+    'NumpadSubtract': 78, 'NumpadAdd': 69,
+    'NumpadEnter': 76,    'NumpadDecimal': 65,
+    'Numpad0': 82, 'Numpad1': 83, 'Numpad2': 84,
+    'Numpad3': 85, 'Numpad4': 86, 'Numpad5': 87,
+    'Numpad6': 88, 'Numpad7': 89, 'Numpad8': 91, 'Numpad9': 92
+}
+
+const APP_DIR = Path(__file__).parent
+
+fn load-raw-f32(p: Path) -> Array[Float] {
+    let blob = p.read-bytes()
+    let n = #blob / 4
+    let fmt: _ = "{n}f"
+    let tup: _ = c.unpack(fmt, blob)
+    [tup[i] for i in ..n]
+}
+
+fn load-profile-raw(
+    dir: Path
+) -> (
+    Dict[Int, Array[Float]],
+    Dict[Int, Array[Float]],
+    Array[Array[Float]],
+    Array[Array[Float]]
+) {
+    let cfg: _ = json::parse((dir / 'config.json').read-text())
+    let pcm = load-raw-f32(dir / 'sound.raw')
+
+    let downs = %{}
+    let ups   = %{}
+    let all-d = []
+    let all-u = []
+
+    for name, def in cfg['definitions'] {
+        let mac-key = WEB_KEY_TO_MAC[name] ?? continue
+        let timing: _ = def['timing']
+
+        let ds = int(timing[0][0] * SAMPLE_RATE / 1000.0)
+        let de = int(timing[0][1] * SAMPLE_RATE / 1000.0)
+        let us = int(timing[1][0] * SAMPLE_RATE / 1000.0)
+        let ue = int(timing[1][1] * SAMPLE_RATE / 1000.0)
+
+        let d = pcm[ds;de]
+        let u = pcm[us;ue]
+
+        downs[mac-key] = d
+        ups[mac-key]   = u
+        all-d.push(d)
+        all-u.push(u)
+    }
+
+    (downs, ups, all-d, all-u)
+}
+
+clap! List {
+}
+
+clap! Args {
+    /// Name of the click profile to use (corresponds to a directory in `sounds/`)
+    profile: String, pos: true
+    cmd list: List
+}
+
+fn main() {
+    if !accessibility-trusted?() {
+        eprint('Grant Accessibility permission, then re-run.')
+        exit(1)
+    }
+
+    let (args, _) = Args.parse()
+
+    let profiles = [p.name for p in (APP_DIR / 'sounds').ls() if p.dir?]
+
+    if args.cmd :: List {
+        for profiles {
+            print(it)
+        }
+        exit(0)
+    }
+
+    let name = args.profile ?? do {
+        let random = rand(profiles)
+        warn!("no profile specified, randomly selecting: {random}")
+        random
+    }
+
+    info!("starting...")
+
+    let dir = APP_DIR / 'sounds' / name
+    if !dir.exists? {
+        critical!("profile '{name}' not found in {APP_DIR}/sounds")
+        exit(1)
+    }
+
+    info!("profile: {name}")
+
+    let (down-clicks, up-clicks, all-downs, all-ups) = load-profile-raw(dir)
+
+    info!("loaded {#all-downs} down + {#all-ups} up clicks")
+
+    let queue = SharedQueue()
+    let playing: Array[{samples: Array[Float], pos: Int}] = []
+
+    let cb-areas = c.box(c.ptr)
+    let cb-count = c.box(c.int)
+
+    fn on-write(stream-ptr: Ptr, frame-min: Int, frame-max: Int) {
+        let stream = SoundIoOutStream(stream-ptr)
+        let channels = stream.layout.channel_count
+
+        while let Some(samples) = queue.try-take(0) {
+            playing.push({samples, pos: 0})
+        }
+
+        let frames-left = frame-max
+        while frames-left > 0 {
+            cb-count[0] = frames-left
+
+            if soundio_outstream_begin_write(stream-ptr, cb-areas, cb-count) != 0 {
+                return
+            }
+
+            let count = cb-count[0]
+            let areas = cb-areas[0]
+
+            break if count == 0
+
+            for frame in ..count {
+                let sample = 0.0
+
+                let i = 0
+                while i < #playing {
+                    if playing[i].pos < #playing[i].samples {
+                        sample += playing[i].samples[playing[i].pos]
+                        playing[i].pos += 1
+                        i += 1
+                    } else {
+                        playing.pop(i)
+                    }
+                }
+
+                for ch in ..channels {
+                    write-sample-float32(areas, ch, frame, sample)
+                }
+            }
+
+            soundio_outstream_end_write(stream-ptr)
+            frames-left -= count
+        }
+    }
+
+    fn trigger(keycode: Int, down?: Bool) {
+        let pool     = down? ? down-clicks : up-clicks
+        let fallback = down? ? all-downs   : all-ups
+        let samples = pool[keycode] ?? fallback[rand(#fallback)]
+        let vol = 0.8 + rand() * 0.2
+        queue.put([s * vol for s in samples])
+    }
+
+    fn on-key(ev-type: Int, ev: CGEvent) {
+        let keycode = ev.get-int(cg.kKeyboardEventKeycode)
+        if ev-type == cg.kEventKeyDown {
+            trigger(keycode, true)
+        } else if ev-type == cg.kEventKeyUp {
+            trigger(keycode, false)
+        }
+        ev
+    }
+
+    let ^ctx = Context()
+    ctx.connect()
+    ctx.flush-events()
+
+    let ^device = ctx.default-output-device
+    info!("output: {device.name}")
+
+    let ^stream = OutStream(device)
+    stream.format = SoundIoFormatFloat32NE
+    stream.sample-rate = SAMPLE_RATE
+    stream.software-latency = 0.01
+    stream.set-write-callback(on-write)
+    stream.open()
+    stream.start()
+
+    let mask = (1 << cg.kEventKeyDown) | (1 << cg.kEventKeyUp)
+    let ^tap = EventTap(mask, on-key, options=cg.kEventTapOptionListenOnly)
+
+    let stop? = false
+    signal(SIGINT,  () -> (stop? = true))
+    signal(SIGTERM, () -> (stop? = true))
+
+    info!('click: listening for keystrokes')
+    while !stop? {
+        ctx.flush-events()
+        run-loop.run(0.25)
+    }
+}
+
+main()

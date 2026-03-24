@@ -1,0 +1,206 @@
+import ffi as c (C!)
+import os
+
+/* Error status */
+const CMARK_NODE_NONE = 0
+
+/* Block */
+const CMARK_NODE_DOCUMENT = 1
+const CMARK_NODE_BLOCK_QUOTE = 2
+const CMARK_NODE_LIST = 3
+const CMARK_NODE_ITEM = 4
+const CMARK_NODE_CODE_BLOCK = 5
+const CMARK_NODE_HTML_BLOCK = 6
+const CMARK_NODE_CUSTOM_BLOCK = 7
+const CMARK_NODE_PARAGRAPH = 8
+const CMARK_NODE_HEADING = 9
+const CMARK_NODE_THEMATIC_BREAK = 10
+
+const CMARK_NODE_FIRST_BLOCK = CMARK_NODE_DOCUMENT
+const CMARK_NODE_LAST_BLOCK = CMARK_NODE_THEMATIC_BREAK
+
+/* Inline */
+const CMARK_NODE_TEXT = 11
+const CMARK_NODE_SOFTBREAK = 12
+const CMARK_NODE_LINEBREAK = 13
+const CMARK_NODE_CODE = 14
+const CMARK_NODE_HTML_INLINE = 15
+const CMARK_NODE_CUSTOM_INLINE = 16
+const CMARK_NODE_EMPH = 17
+const CMARK_NODE_STRONG = 18
+const CMARK_NODE_LINK = 19
+const CMARK_NODE_IMAGE = 20
+
+const CMARK_NODE_FIRST_INLINE = CMARK_NODE_TEXT
+const CMARK_NODE_LAST_INLINE = CMARK_NODE_IMAGE
+
+if not let $cmark = c.open('cmark') {
+  throw RuntimeError('failed to load cmark')
+}
+
+C! cmark fn {
+    cmark_node *cmark_parse_document(c.ptr, c.u64, c.int)
+    int cmark_node_get_type(c.ptr)
+    char *cmark_node_get_type_string(c.ptr)
+    cmark_node *cmark_node_next(c.ptr)
+    cmark_node *cmark_node_first_child(c.ptr)
+    cmark_node *cmark_node_last_child(c.ptr)
+    char *cmark_node_get_literal(c.ptr)
+    int cmark_node_get_heading_level(c.ptr)
+    int cmark_node_get_list_type(c.ptr)
+    int cmark_node_get_list_tight(c.ptr)
+    char *cmark_node_get_fence_info(c.ptr)
+    char *cmark_node_get_url(c.ptr)
+    char *cmark_node_get_title(c.ptr)
+}
+
+const CMARK_NO_LIST      = 0
+const CMARK_BULLET_LIST  = 1
+const CMARK_ORDERED_LIST = 2
+
+pub const ListType = {
+    None: CMARK_NO_LIST,
+    Bullet: CMARK_BULLET_LIST,
+    Ordered: CMARK_ORDERED_LIST
+}
+
+pub const NodeType = {
+  None: CMARK_NODE_NONE,
+  Document: CMARK_NODE_DOCUMENT,
+  BlockQuote: CMARK_NODE_BLOCK_QUOTE,
+  Paragraph: CMARK_NODE_PARAGRAPH,
+  Strong: CMARK_NODE_STRONG,
+  Emph: CMARK_NODE_EMPH,
+  Text: CMARK_NODE_TEXT,
+  SoftBreak: CMARK_NODE_SOFTBREAK,
+  LineBreak: CMARK_NODE_LINEBREAK,
+  List: CMARK_NODE_LIST,
+  Heading: CMARK_NODE_HEADING,
+  Item: CMARK_NODE_ITEM,
+  Code: CMARK_NODE_CODE,
+  CodeBlock: CMARK_NODE_CODE_BLOCK,
+  HtmlBlock: CMARK_NODE_HTML_BLOCK,
+  HtmlInline: CMARK_NODE_HTML_INLINE,
+  ThematicBreak: CMARK_NODE_THEMATIC_BREAK,
+  Link: CMARK_NODE_LINK,
+  Image: CMARK_NODE_IMAGE
+};
+
+fn escape-html(s: String) -> String {
+  s.sub('&', '&amp;').sub('<', '&lt;').sub('>', '&gt;').sub('"', '&quot;')
+}
+
+pub class MarkdownNode {
+  __node: _
+
+  init(node) {
+    __node = node
+  }
+
+  type -> Int {
+    cmark_node_get_type(__node)
+  }
+
+  text -> String | nil {
+    if let $p = cmark_node_get_literal(__node) {
+      c.str(p)
+    } else if let $c = cmark_node_first_child(__node) and c == cmark_node_last_child(__node) {
+      MarkdownNode(c).text
+    }
+  }
+
+  heading-level -> Int | nil {
+    if let $n = cmark_node_get_heading_level(__node) and n > 0 {
+      n
+    }
+  }
+
+  list-type -> Int | nil {
+    if let $t = cmark_node_get_list_type(__node) and t > 0 {
+      t
+    }
+  }
+
+  info-string -> String | nil {
+    if let $p = cmark_node_get_fence_info(__node) {
+      c.str(p)
+    }
+  }
+
+  tight? -> Bool {
+    cmark_node_get_list_tight(__node) == 1
+  }
+
+  url -> String | nil {
+    if let $p = cmark_node_get_url(__node) {
+      c.str(p)
+    }
+  }
+
+  title -> String | nil {
+    if let $p = cmark_node_get_title(__node) {
+      c.str(p)
+    }
+  }
+
+  children* -> Generator[MarkdownNode] {
+    for let c = cmark_node_first_child(__node); c != nil; c = cmark_node_next(c) {
+      yield MarkdownNode(c)
+    }
+  }
+
+  children-html -> String {
+    children.map(\_.html).join()
+  }
+
+  render-children(renderers: Dict) -> String {
+    children.map(\_.render(renderers)).join()
+  }
+
+  code-tag {
+    if let $lang = info-string and #lang > 0 {
+      "<code class=\"language-{lang}\">"
+    } else {
+      "<code>"
+    }
+  }
+
+  html -> String {
+    render(Dict())
+  }
+
+  render(renderers: Dict = Dict()) -> String {
+    let t = type
+
+    if let $custom = renderers[t] {
+      return custom(self, renderers)
+    }
+
+    match t {
+      NodeType.Emph          => "<em>{render-children(renderers)}</em>",
+      NodeType.Strong        => "<strong>{render-children(renderers)}</strong>",
+      NodeType.Text          => escape-html(text ?? ''),
+      NodeType.SoftBreak     => "\n",
+      NodeType.LineBreak     => "<br>",
+      NodeType.Heading       => "<h{heading-level}>{render-children(renderers)}</h{heading-level}>",
+      NodeType.Link          => "<a href=\"{url}\">{render-children(renderers)}</a>",
+      NodeType.Image         => "<img src=\"{url}\">",
+      NodeType.Document      => render-children(renderers),
+      NodeType.BlockQuote    => "<blockquote>{render-children(renderers)}</blockquote>",
+      NodeType.Code          => "<code>{escape-html(text ?? '')}</code>",
+      NodeType.CodeBlock     => "<pre>{code-tag}{escape-html(text ?? '')}</code></pre>",
+      NodeType.HtmlBlock     => text ?? '',
+      NodeType.HtmlInline    => text ?? '',
+      NodeType.ThematicBreak => "<hr>",
+      NodeType.Paragraph     => "<p>{render-children(renderers)}</p>",
+      NodeType.List          => (list-type == ListType.Bullet) ? "<ul>{render-children(renderers)}</ul>" : "<ol>{render-children(renderers)}</ol>",
+      NodeType.Item          => "<li>{render-children(renderers)}</li>"
+    }
+  }
+}
+
+pub fn parse(s: String | Blob) -> MarkdownNode | nil {
+  if let $doc = cmark_parse_document(s, s.size(), 0) {
+    MarkdownNode(doc)
+  }
+}

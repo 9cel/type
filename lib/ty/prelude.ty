@@ -1,0 +1,4562 @@
+import base64
+import bit
+import errno
+import json
+import math
+import os
+import ptr
+import stdio
+import thread
+import time
+import ty
+import ty.mod
+import ty.parse as parse
+import ty.token as lex
+import ty.types as types
+
+use TokenData = { id: String, module: String }
+              | { int: Int }
+              | { str: String }
+              | { comment: String }
+
+use TokenLocation = {
+    line: Int,
+    col:  Int,
+    byte: Int
+}
+
+use Token = TokenData & {
+    type:  String,
+    start: TokenLocation,
+    end:   TokenLocation,
+    ?meta: String | nil
+}
+
+use Subscript[T, U] = { `[]`: T -> U };
+
+macro __flat-array! $$[
+    $${
+        fn flat(t0) {
+            match t0 {
+                types::Object(::Array, [u0])
+                    => flat(u0),
+
+                types::Union(us)
+                    => types.Union([flat(it) for us]),
+                _
+                    => types.Object(Array, [t0])
+            }
+        }
+    }
+$$]
+
+fn parse::expr(prec: ?Int, raw: true, resolve: ?Bool = false) -> (AST, _);
+fn parse::expr(prec: ?Int, raw: ?Bool, resolve: ?Bool = false) -> AST;
+
+fn parse::stmt(prec: ?Int, raw: Bool) -> (AST, _);
+fn parse::stmt(prec: ?Int) -> AST;
+
+fn lex::next() -> Token;
+fn lex::peek(i: Int = 0) -> Token;
+
+fn ty::gensym() -> String;
+
+macro ParseError = {
+    msg: String,
+    location: {
+        line: Int,
+        col: Int,
+        byte: Int
+    },
+    last: AST
+}
+
+fn ty::parse(
+    source: String,
+    tokens: true,
+    deep: Bool = false,
+    resolve: Bool = false,
+    scope: Ptr[_] = nil
+) -> Ok[(AST, {tokens: [Token]})] | Err[ParseError];
+fn ty::parse(
+    source: String,
+    tokens: false | nil,
+    deep: Bool = false,
+    resolve: Bool = false,
+    scope: Ptr[_] = nil
+) -> Ok[AST] | Err[ParseError];
+
+fn |>[a, b, c](f: a -> b, g: b -> c) -> (a -> c) { g@(f(*, **)) }
+
+fn !::(a: Any, b: Any) -> Bool { !(a :: b) }
+
+fn ==(a: Any, b: Any) -> Bool;
+
+fn -(a: Int, b: Int) -> Int;
+fn +(a: Int, b: Int) -> Int;
+fn *(a: Int, b: Int) -> Int;
+fn /(a: Int, b: Int) -> Int;
+fn %(a: Int, b: Int) -> Int;
+fn %/(a: Int, b: Int) -> (Int, Int);
+fn &(a: Int, b: Int) -> Int;
+fn |(a: Int, b: Int) -> Int;
+fn ^(a: Int, b: Int) -> Int;
+fn >>(a: Int, b: Int) -> Int;
+fn <<(a: Int, b: Int) -> Int;
+
+fn -(a: Bool, b: Bool) -> Int;
+fn +(a: Bool, b: Bool) -> Int;
+fn *(a: Bool, b: Bool) -> Int;
+
+fn -(a: Float, b: Float) -> Float;
+fn +(a: Float, b: Float) -> Float;
+fn *(a: Float, b: Float) -> Float;
+fn /(a: Float, b: Float) -> Float;
+fn %(a: Float, b: Float) -> Float;
+
+fn -(a: Float, b: Int) -> Float;
+fn +(a: Float, b: Int) -> Float;
+fn *(a: Float, b: Int) -> Float;
+fn /(a: Float, b: Int) -> Float;
+fn %(a: Float, b: Int) -> Float;
+
+fn -(a: Int, b: Float) -> Float;
+fn +(a: Int, b: Float) -> Float;
+fn *(a: Int, b: Float) -> Float;
+fn /(a: Int, b: Float) -> Float;
+fn %(a: Int, b: Float) -> Float;
+
+fn -(a: Bool, b: Int) -> Int;
+fn +(a: Bool, b: Int) -> Int;
+fn *(a: Bool, b: Int) -> Int;
+
+fn -(a: Int, b: Bool) -> Int;
+fn +(a: Int, b: Bool) -> Int;
+fn *(a: Int, b: Bool) -> Int;
+
+fn <(a: Int, b: Int) -> Bool;
+fn <(a: Float, b: Float) -> Bool;
+fn <(a: Int, b: Float) -> Bool;
+fn <(a: Float, b: Int) -> Bool;
+fn <(a: String, b: String) -> Bool;
+fn <(a: Bool, b: Bool) -> Bool;
+fn <(a: Bool, b: Int) -> Bool;
+fn <(a: Int, b: Bool) -> Bool;
+
+fn <=(a: Int, b: Int) -> Bool;
+fn <=(a: Float, b: Float) -> Bool;
+fn <=(a: Int, b: Float) -> Bool;
+fn <=(a: Float, b: Int) -> Bool;
+fn <=(a: String, b: String) -> Bool;
+fn <=(a: Bool, b: Bool) -> Bool;
+fn <=(a: Bool, b: Int) -> Bool;
+fn <=(a: Int, b: Bool) -> Bool;
+
+fn >(a: Int, b: Int) -> Bool;
+fn >(a: Float, b: Float) -> Bool;
+fn >(a: Int, b: Float) -> Bool;
+fn >(a: Float, b: Int) -> Bool;
+fn >(a: String, b: String) -> Bool;
+fn >(a: Bool, b: Bool) -> Bool;
+fn >(a: Bool, b: Int) -> Bool;
+fn >(a: Int, b: Bool) -> Bool;
+
+fn >=(a: Int, b: Int) -> Bool;
+fn >=(a: Float, b: Float) -> Bool;
+fn >=(a: Int, b: Float) -> Bool;
+fn >=(a: Float, b: Int) -> Bool;
+fn >=(a: String, b: String) -> Bool;
+fn >=(a: Bool, b: Bool) -> Bool;
+fn >=(a: Bool, b: Int) -> Bool;
+fn >=(a: Int, b: Bool) -> Bool;
+
+fn <=>(a: Int, b: Int) -> Int;
+fn <=>(a: Float, b: Float) -> Int;
+fn <=>(a: Int, b: Float) -> Int;
+fn <=>(a: Float, b: Int) -> Int;
+fn <=>(a: String, b: String) -> Int;
+fn <=>(a: Bool, b: Bool) -> Int;
+fn <=>(a: Bool, b: Int) -> Int;
+fn <=>(a: Int, b: Bool) -> Int;
+fn <=>[T, U](a: Array[T], b: Array[U]) -> Int where (T <=> U): Int;
+
+fn &(a: Class, b: Class) -> (Any -> Bool);
+fn |(a: Class, b: Class) -> (Any -> Bool);
+
+fn &(a: Function, b: Object) -> (Any -> Bool);
+fn |(a: Function, b: Object) -> (Any -> Bool);
+
+fn +(a: String, b: String) -> String;
+
+fn +(a: String, b: Int | Bool) -> String;
+fn *(a: String, b: Int | Bool) -> String;
+fn -(a: String, b: Int | Bool) -> String;
+
+fn +[K, U, V](a: Dict[K, U], b: Dict[K, V]) -> Dict[K, U | V];
+fn -[K, V](a: Dict[K, V], b: Dict[K, Any]) -> Dict[K, V];
+fn &[K, V](a: Dict[K, V], b: Dict[K, Any]) -> Dict[K, V];
+
+fn %.*[T, U, *Ts](tpl: (T, Ts), f: T -> U) -> (U, Ts);
+
+fn doc(c:  Class)    -> (String, String, [(String, String, String)]);
+fn doc(f:  Function) -> (String, String, String);
+fn doc(id: Any)   -> (String, String, String)
+                  | (String, String [(String, String, String)])
+                  | nil;
+
+fn set-doc[T](x: T, name: ?String, proto: ?String, doc: ?String) -> T;
+
+fn slurp(file: ?String | Int) -> String;
+fn rand[a](items: Array[a]) -> a;
+fn rand() -> Float;
+fn rand(n: Int, m: ?Int) -> Int;
+fn object[T](cls: Class[T]) -> T;
+fn print(*args: Any, sep: String = ', ', end: String = '\n', file: _, flush: Bool = false) -> Int;
+fn str(x: Any) -> String;
+fn int[a](x: a, base: ?Int) -> Int;
+fn float[a](x: a) -> Float;
+fn regex(pattern: String, flags: String = '') -> Regex & RegexV;
+fn min[...Ts](*xs: ...Ts) -> ...(Ts |) where (...(Ts |) <=> ...(Ts |)): Int;
+fn max[...Ts](*xs: ...Ts) -> ...(Ts |) where (...(Ts |) <=> ...(Ts |)): Int;
+fn fmt(str: String, *args: _);
+fn cast[a](x: _) -> a { x }
+fn tuple[...Ts](xs: ...Ts) -> (Ts,);
+fn tuple(*xs: _, %kws: _) -> (*_);
+fn abs(k: Int) -> Int;
+fn abs(x: Float) -> Float;
+fn floor(x: Int | Float) -> Int;
+fn ceil(x: Int | Float) -> Int;
+fn round(x: Int | Float) -> Float;
+fn iround(x: Int | Float) -> Int;
+fn ord(character: String) -> Int;
+fn chr(codepoint: Int) -> String;
+fn getenv(var: String) -> String | nil;
+fn setenv(var: String, val: String) -> nil;
+
+fn math::sqrt(x: Int | Float) -> Float;
+fn math::cos(x: Int | Float) -> Float;
+fn math::sin(x: Int | Float) -> Float;
+fn math::tan(x: Int | Float) -> Float;
+fn math::atan(x: Int | Float) -> Float;
+fn math::atan2(x: Int | Float, y: Int | Float) -> Float;
+fn math::asin(x: Int | Float) -> Float;
+fn math::acos(x: Int | Float) -> Float;
+fn math::cbrt(x: Int | Float) -> Float;
+fn math::pow(x: Int | Float, y: Int | Float) -> Float;
+fn math::exp(x: Int | Float) -> Float;
+fn math::log(x: Int | Float) -> Float;
+fn math::log2(x: Int | Float) -> Float;
+fn math::log10(x: Int | Float) -> Float;
+
+fn base64::encode(input: String | Blob) -> String;
+fn base64::decode(input: String | Blob) -> Blob;
+
+pub use time::Tm = {
+    ?sec:    Int,
+    ?min:    Int,
+    ?hour:   Int,
+    ?mday:   Int,
+    ?mon:    Int,
+    ?year:   Int,
+    ?wday:   Int,
+    ?yday:   Int,
+    ?isdst:  Bool,
+    ?gmtoff: Int,
+    ?zone:   ?String
+}
+
+pub use time::Timespec = {
+    sec:  Int,
+    nsec: Int
+}
+
+pub use time::ClockID =
+    time::CLOCK_REALTIME
+  | time::CLOCK_MONOTONIC
+  | time::CLOCK_PROCESS_CPUTIME_ID
+  | time::CLOCK_THREAD_CPUTIME_ID
+
+fn time::time(tm: ?time::Tm, utc: Bool = false) -> Int;
+fn time::gettime(clock: ?time::ClockID) -> time::Timespec;
+fn time::localtime(time: ?Int) -> time::Tm;
+fn time::utime(clock: ?time::ClockID) -> Int;
+fn time::now(clock: ?time::ClockID) -> Float;
+
+fn errno::get() -> Int;
+fn errno::str(err: Int) -> String;
+fn errno::str() -> String;
+
+fn os::listdir(path: String) -> [String];
+
+__set_type__ ty::executable String
+
+const `,` = tuple
+
+class Object {
+    is?(c) {
+        subclass?(type(self), c)
+    }
+
+    drill(path) {
+        let x: _ = self
+
+        for i in path {
+            x = x[i]
+        }
+
+        return x
+    }
+
+    members() -> Dict[String, Any] {
+        ::members(self)
+    }
+
+    member(*args: Any) -> Any {
+        ::member(self, *args)
+    }
+
+    |(other: Object) -> (Any -> Bool) {
+        c -> (c :: self) || (c :: other)
+    }
+
+    &(other: Object) -> (Any -> Bool) {
+        c -> (c :: self) && (c :: other)
+    }
+
+    !::(x) {
+        !(self :: x)
+    }
+
+    :>(other) {
+        x -> (self(x) :: other)
+    }
+
+    <.>(other) {
+        (*xs) -> self(other(*xs))
+    }
+
+    *>(f) {
+        f(self)
+    }
+
+    `in`(other) -> Bool {
+        self in other
+    }
+
+    __match__(other) {
+        self == other
+    }
+
+    ?() {
+        x -> (x == nil) || (x :: self)
+    }
+
+    __str__() {
+        str(self)
+    }
+
+    __fmt__(fmt) {
+        "{"{self}":{fmt}}"
+    }
+
+    __repr__() {
+        if pretty {
+            pretty(self, oneline=true)
+        } else {
+            show(self)
+        }
+    }
+}
+
+class Class[T] {
+    __id__:             Int
+    __name__:           String
+    __fqn__:            String
+    __fields__:         Array[_]
+    __methods__:        Dict[String, _]
+    __static_methods__: Dict[String, _];
+
+    |(other) {
+        c -> (c :: self) || (c :: other)
+    }
+
+    &(other) {
+        c -> (c :: self) && (c :: other)
+    }
+
+    __match__(other) {
+        type(other) != Class && other.is?(self)
+    }
+
+    static name(c) {
+        c.__name__
+    }
+
+    __get__(x: Object, field: String) -> _ {
+        x.?{field} ?? x.{"{field[1;]}${self.__id__}"}
+    }
+
+    [](_) {
+        self
+    }
+}
+
+class Function : Iter {
+    __name__: String;
+    __fqn__:  String;
+
+    init() {
+        id
+    }
+
+    flip() {
+        (a, b) -> self(b, a)
+    }
+
+    >*() {
+        args -> self(*args)
+    }
+
+    bind(x) {
+        bindMethod(self, x)
+    }
+
+    apply(x, *ys) {
+        ::apply(self, x, *ys)
+    }
+
+    iter*(x) {
+        while true { yield x; x = self(x) }
+    }
+
+    __match__(x) {
+        self(x)
+    }
+
+    __next__() {
+        Some(self())
+    }
+
+    &&&(g) {
+        x -> (self(x), g(x))
+    }
+
+    ***(g) {
+        |(x, y)| -> (self(x), g(y))
+    }
+
+    >>(g) {
+        \do {
+            self(*, **)
+            g(*, **)
+        }
+    }
+
+    static name(f) {
+        f.__name__
+    }
+
+    static disassemble(f) {
+        ty.disassemble(f)
+    }
+}
+
+class Array[T] : Iterable[T] {
+    init(*xs: T);
+
+    static of(*shape, fill=nil) -> _ {
+        match shape {
+            [k]      => [fill for _ in ..k],
+            [k, *ks] => [Array.of(*ks, fill: fill) for _ in ..k]
+        }
+    }
+
+    clone() -> Array[T];
+    count(x: T) -> Int;
+    count-by(predicate: T -> Any) -> Int;
+    drop!(n: Int) -> Array[T];
+    drop(n: Int) -> Array[T];
+    drop-while!(predicate: T -> Any) -> Array[T];
+    drop-while(predicate: T -> Any) -> Array[T];
+    each(f: (T, ?Int) -> Any) -> Array[T];
+    each[U](x: U, f: (U, ?T, ?Int) -> Any) -> U;
+    enumerate() -> Array[(Int, T)];
+    filter!(pred: T -> Any) -> Array[T];
+    filter(pred: T -> Any) -> Array[T];
+    group() -> Array[Array[T]];
+    groups-of(n: Int, keepShort: Bool = true) -> Array[Array[T]];
+    insert(i: Int, *xs: T) -> nil;
+    join(sep: String = '') -> String;
+    len() -> Int;
+    map![U](fun: T -> U) -> Array[U];
+    map[U](fun: T -> U) -> Array[U];
+    push(x: T) -> nil;
+    pop(i: ?Int) -> T;
+    remove!(x: Any) -> Array[T];
+    remove![U](x: nil) -> Array[U] where T: nil | U;
+    remove(x: Any) -> Array[T];
+    reverse!(start: ?Int, count: ?Int) -> Array[T];
+    reverse(start: ?Int, count: ?Int) -> Array[T];
+    rotate(n: Int = 1) -> Array[T];
+    rotate!(n: Int = 1) -> Array[T];
+    search(x: T) -> Int | nil;
+    search-by(predicate: T -> Any) -> Int | nil;
+    shuffle!() -> Array[T];
+    shuffle() -> Array[T];
+    sort!(by: T -> Any, desc: Bool = false) -> Array[T];
+    sort!(desc: Bool = false) -> Array[T];
+    sort!(cmp: (T, T) -> Any, desc: Bool = false) -> Array[T];
+    sort(cmp: (T, T) -> Any, desc: Bool = false) -> Array[T];
+    sort[U](by: T -> U, desc: Bool = false) -> Array[T] where (U <=> U): Int;
+    sort(desc: Bool = false) -> Array[T] where (T <=> T): Int;
+    slice(i: Int | nil, j: Int | nil, k: Int | nil) -> Array[T];
+    splice(i: Int = 0, n: Int = #self) -> Array[T];
+    split(i: Int) -> (Array[T], Array[T]);
+    sum() -> T | nil where (T + T): T;
+    sum(zero: T) -> T;
+    take!(n: Int) -> Array[T];
+    take(n: Int) -> Array[T];
+    take-while!(predicate: T -> Any) -> Array[T];
+    take-while(predicate: T -> Any) -> Array[T];
+    tally() -> Dict[T, Int];
+    tally[U](key: T -> U) -> Dict[U, Int];
+    uniq!() -> Array[T];
+    uniq() -> Array[T];
+    partition(p: T -> Any) -> (Array[T], Array[T]);
+
+    window[U](n: Int, f: (*T) -> U) -> Array[U];
+    window(n: Int) -> Array[Array[T]];
+
+    zip[...U, R](
+        *ys: ...Array[U],
+        f: (T, U) -> R
+    ) -> Array[R];
+    zip[...U](*ys: ...Array[U]) -> Array[(T, U)];
+
+    shape() {
+        use NestedArray[U] = Array[U] | Array[NestedArray[U]]
+
+        let shape = []
+        let x: T | NestedArray[T] = self
+
+        while match x {
+            xs: Array => {
+                shape.push(#xs)
+                x = xs[0]
+            }
+        }
+
+        return shape
+    }
+
+    map?[U](f: T -> Some[U] | None) -> Array[U] {
+        let ys = []
+
+        for x in self {
+            if let Some(y) = f(x) {
+                ys.push(y)
+            }
+        }
+
+        return ys
+    }
+
+    reject(p: T -> Any) -> Array[T] {
+        filter(\!p(_))
+    }
+
+    reject!(p: T -> Any) -> Array[T] {
+        filter!(\!p(_))
+    }
+
+    span(p: T -> Any) -> (Array[T], Array[T]) {
+        let good = [x for x in self while p(x)]
+        (good, self[#good;])
+    }
+
+    shift-while(p: T -> Any) -> Array[T] {
+        let i = search-by(`!` . p) ?? #self
+        splice(0, i)
+    }
+
+    transpose[U]() -> Array[T] where T: Array[U] {
+        [[self[j][i] for j in ..#self] for i in ..#self[0]]
+    }
+
+    indices*() -> Generator[_] {
+        for x, i in self {
+            if x :: Array {
+                for idx in x.indices() {
+                    yield tuple(*((idx :: Array) ? ([i] + idx) : [i, idx]))
+                }
+            } else {
+                yield i
+            }
+        }
+    }
+
+    range -> Range {
+        0..#self
+    }
+
+    permutations*() -> Generator[Array[T]] where (T <=> T): Int {
+        let xs = self.sort()
+
+        yield xs
+
+        while $xs = xs.next-permutation!() {
+            yield xs
+        }
+    }
+
+    flat(n: ?Int) -> __flat-array!(T);
+
+    flatMap[U](f: T -> Array[U]) -> Array[U] {
+        map(f).flat(1)
+    }
+
+    sorted? {
+        for i in 1..#self {
+            if self[i - 1] > self[i] {
+                return false
+            }
+        }
+
+        true
+    }
+
+    split-when(p: T -> Any) -> Array[Array[T]] {
+        let result = []
+        let chunk  = []
+
+        for x in self {
+            if p(x) {
+                if #chunk > 0 {
+                    result.push(chunk)
+                    chunk = []
+                }
+            } else {
+                chunk.push(x)
+            }
+        }
+
+        if #chunk > 0 {
+            result.push(chunk)
+        }
+
+        return result
+    }
+
+    split-on(p: T) -> Array[Array[T]] {
+        split-when(\_ == p)
+    }
+
+    split-any(on: {contains?: T -> Bool}) -> Array[Array[T]] {
+        split-when(\_ in on)
+    }
+
+    at(i) {
+        if i < #self {
+            self[i]
+        }
+    }
+
+    empty? {
+        #self == 0
+    }
+
+    cycle*() {
+        if #self == 0 {
+            return None
+        }
+
+        while true {
+            for x in self {
+                yield x
+            }
+        }
+    }
+
+    list() {
+        self
+    }
+
+    mean(f: T -> Int | Float = id) -> Float | nil {
+        match self {
+            [] => nil,
+            _  => map(\float(f(_))).sum() / #self
+        }
+    }
+
+    median() -> T | nil where (T <=> T): Int {
+        if let Some(m) = sort()(#self / 2) {
+            m
+        }
+    }
+
+    coalesce() -> T | nil {
+        for x in self if x != nil {
+            return x
+        }
+    }
+
+    argmax(f: T -> Any = id) -> ?Int {
+        if #self == 0 { return nil }
+
+        let i, max = 0, f(self[0])
+
+        for j in 1..#self {
+            let y = f(self[j])
+            if y > max {
+                i, max = j, y
+            }
+        }
+
+        return i
+    }
+
+    str() -> String {
+        join()
+    }
+
+    popWhile(p) {
+        while #self > 0 && p(self[-1]) {
+            self.pop()
+        }
+
+        return self
+    }
+
+    tryPop() {
+        (#self > 0) ? Some(self.pop()) : None
+    }
+
+    __iter__*() -> Generator[T] {
+        for x in self {
+            yield x
+        }
+    }
+
+    static [](T) {
+        xs -> do {
+            (xs :: Array) && xs.all?(x -> x :: T)
+        }
+    }
+
+    [](i: Int) -> T {
+        self[i]
+    }
+
+    [](range: Range) -> Array[T] {
+        self[range]
+    }
+
+    [;;](i: Int = 0, j: Int | nil = nil, k: Int = 1) -> Array[T] {
+        slice(i, j, k)
+    }
+
+    #() { len() }
+
+    +[U](ys: Array[U]) -> Array[T | U]  { self + ys }
+    *[U](ys: Array[U]) -> Array[(T, U)] { self * ys }
+    *(n: Int | Bool)   -> Array[T]      { self * n  }
+
+    __call__(i: Int) -> Some[T] | None;
+
+    get(i: Int) -> Some[T] | None {
+        let n = #self
+        (i in -n..n) ? Some(self[i]) : None
+    }
+}
+
+macro _ArrayItem = ty.ArrayItem[{item: AST, ?cond: AST, ?optional: Bool | nil}]
+
+macro _DictItem = ty.DictItem[(AST, AST)]
+
+macro __type! {
+    let t0: _ = parse::type(0)
+    ty.Value(t0)
+}
+
+macro _Param = ty.Param[{name: String, ?constraint: AST, ?default: AST}]
+             | ty.Gather[String]
+             | ty.Kwargs[String]
+             | String
+
+macro _Func = {
+    ?name: String | nil,
+    ?params: Array[_Param] | nil,
+    ?rt: AST,
+    ?decorators: [AST] | nil,
+    body: AST
+}
+
+
+macro __define_ast! {
+    let f = parse.expr(999)
+
+    let union: _ = __type!
+         ty.Int[Int]
+       | ty.String[String]
+       | ty.Float[Float]
+       | ty.Bool[Bool]
+       | ty.Id[{name: String, ?module: String | nil, ?constraint: AST}]
+       | ty.Resource[{name: String, ?module: String | nil, ?constraint: AST}]
+       | ty.NotNil[{name: String, ?module: String | nil, ?constraint: AST}]
+       | ty.MemberAccess[(AST, String)]
+       | ty.DynMemberAccess[(AST, AST)]
+       | ty.TryMemberAccess[(AST, String)]
+       | ty.TryDynMemberAccess[(AST, String)]
+       | ty.Count[AST]
+       | ty.Question[AST]
+       | ty.Not[AST]
+       | ty.Neg[AST]
+       | ty.PreInc[AST]
+       | ty.PostInc[AST]
+       | ty.PreDec[AST]
+       | ty.PostDec[AST]
+       | ty.Subscript[(AST, AST)]
+       | ty.Slice[(AST, AST, AST, AST)]
+       | ty.Array[Array[_ArrayItem]]
+       | _ArrayItem
+       | ty.Dict[{items: [_DictItem], ?default: AST}]
+       | _DictItem
+       | ty.Call[{func: AST, args: [ty.Arg[{arg: AST, ?name: String | nil, ?cond: AST}]]}]
+       | ty.MethodCall[{object: AST, method: String, args: [ty.Arg[{arg: AST, ?name: String | nil, ?cond: AST}]]}]
+       | ty.Arg[{arg: AST, ?name: String | nil, ?cond: AST}]
+       | ty.Record[Array[ty.RecordEntry[{?name: String | nil, item: AST, ?cond: AST, ?optional: Bool}]]]
+       | ty.RecordEntry[{?name: String | nil, item: AST, ?cond: AST, ?optional: Bool}]
+       | ty.Func[_Func]
+       | ty.FuncDef[_Func]
+       | ty.ImplicitFunc[_Func]
+       | _Param
+       | ty.Class[{
+             name: String,
+             `super`: AST,
+             fields: [AST],
+             methods: [AST],
+             getters: [AST],
+             setters: [AST],
+             static-methods: [AST],
+             static-getters: [AST],
+             static-fields: [AST]
+         }]
+       | ty.Let[(AST, AST)]
+       | ty.Assign[(AST, AST)]
+       | ty.Break[{?value: AST, ?depth: Int}]
+       | ty.Break
+       | ty.Return[Array[AST]]
+       | ty.Yield[Array[AST]]
+       | ty.Generator[AST]
+       | ty.Union[Array[AST]]
+       | ty.Any[AST]
+       | ty.Any
+       | ty.ArrayCompr[{
+            items: [_ArrayItem],
+            pattern: AST,
+            iter: AST,
+            ?`while`: AST,
+            ?`if`: AST,
+            ?`where`: AST
+         }]
+       | ty.DictCompr[{
+            items: [_DictItem],
+            pattern: AST,
+            iter: AST,
+            ?default: AST,
+            ?`while`: AST,
+            ?`if`: AST,
+            ?`where`: AST
+         }]
+       | ty.Each[{iter: AST, pattern: AST, expr: AST, ?`if`: AST, ?`while`: AST}]
+       | ty.SpecialString[Array[String | AST | (AST, String | nil, Int | nil, AST)]]
+       | ty.LangString[(AST, Array[String | AST | (AST, String | nil, Int | nil, AST)])]
+       | ty.Spread[AST]
+       | ty.Splat[AST]
+       | ty.Block[Array[AST]]
+       | ty.Multi[Array[AST]]
+       | ty.Match[(AST, Array[(AST, AST)])]
+       | ty.WhileMatch[(AST, Array[(AST, AST)])]
+       | ty.While[([AST], AST)]
+       | ty.Defer[AST]
+       | ty.Eval[AST]
+       | ty.Throw[AST]
+       | ty.Try[{body: AST, catches: Array[(AST, AST)], ?always: AST}]
+       | ty.For[(AST, AST, AST, AST)]
+       | ty.UserOp[(String, AST, AST)]
+       | ty.Add[(AST, AST)]
+       | ty.Sub[(AST, AST)]
+       | ty.Mul[(AST, AST)]
+       | ty.Div[(AST, AST)]
+       | ty.Mod[(AST, AST)]
+       | ty.MutAdd[(AST, AST)]
+       | ty.MutSub[(AST, AST)]
+       | ty.MutDiv[(AST, AST)]
+       | ty.MutMod[(AST, AST)]
+       | ty.GT[(AST, AST)]
+       | ty.LT[(AST, AST)]
+       | ty.GEQ[(AST, AST)]
+       | ty.LEQ[(AST, AST)]
+       | ty.Eq[(AST, AST)]
+       | ty.NotEq[(AST, AST)]
+       | ty.And[(AST, AST)]
+       | ty.Or[(AST, AST)]
+       | ty.BitAnd[(AST, AST)]
+       | ty.BitOr[(AST, AST)]
+       | ty.Xor[(AST, AST)]
+       | ty.Shl[(AST, AST)]
+       | ty.Shr[(AST, AST)]
+       | ty.MutShl[(AST, AST)]
+       | ty.MutShr[(AST, AST)]
+       | ty.Wtf[(AST, AST)]
+       | ty.Cmp[(AST, AST)]
+       | ty.LT[(AST, AST)]
+       | ty.GT[(AST, AST)]
+       | ty.LEQ[(AST, AST)]
+       | ty.GEQ[(AST, AST)]
+       | ty.In[(AST, AST)]
+       | ty.NotIn[(AST, AST)]
+       | ty.Matches[(AST, AST)]
+       | ty.KwAnd[(AST, AST)]
+       | ty.DotDot[(AST, AST)]
+       | ty.DotDotDot[(AST, AST)]
+       | ty.Cond[(AST, AST, AST)]
+       | ty.If[(AST, AST, AST)]
+       | ty.IfNot[(AST, AST, AST)]
+       | ty.TagPattern[(String, AST)]
+       | ty.Tagged[_]
+       | ty.View[(AST, AST)]
+       | ty.NotNilView[(AST, AST)]
+       | ty.Stop[AST]
+       | ty.Nil
+       | ty.Value[_]
+       | ty.Expr[_]
+       | ty.Stmt[_]
+       | nil
+
+    return __eval__(f)(union)
+}
+
+use AST = __define_ast!(fn (t0) { t0 })
+
+class Dict[K, V] : Iterable[K, V] {
+    init();
+
+    keys()   -> Array[K];
+    values() -> Array[V];
+    items()  -> Array[(K, V)];
+
+    update(other: Dict[K, V], combine: ?((V, V) -> V)) -> Dict[K, V];
+    subtract(other: Dict[K, V], callback: ?((V, V) -> Any)) -> Dict[K, V];
+
+    pop(i: ?Int) -> (K, V);
+
+    keep(f: (K, V) -> Any) -> Dict[K, V];
+    keep!(f: (K, V) -> Any) -> Dict[K, V];
+
+    map(f) {
+        return %{ k: f(v) for k, v in self }
+    }
+
+    kmap(f, combine) {
+        let new = %{}
+        for k, v in self {
+            let key = f(k)
+            if new.has?(key) {
+                new[key] = combine(new[key], v)
+            } else {
+                new[key] = v
+            }
+        }
+        return new
+    }
+
+    <<(x) {
+        self[x] ?= nil
+    }
+
+    &(o: Dict[K, V]) -> Dict[K, V] {
+        %{k: v for k, v in self if k in o}
+    }
+
+    <=(o) {
+        ![*self].any?(\_ not in o)
+    }
+
+    iterValues*() {
+        for _, v in self {
+            yield v
+        }
+    }
+
+    __iter__() -> Iter[K, V] {
+        return cast(self.keys().zip(self.values()).__iter__())
+    }
+
+    reject(f: (K, V) -> Any) -> Dict[K, V] {
+        keep((k, v) -> !f(k, v))
+    }
+
+    reject!(f: (K, V) -> Any) -> Dict[K, V] {
+        keep!((k, v) -> !f(k, v))
+    }
+
+    [](key: K) -> V {
+        self[key]
+    }
+
+    static [](K, V) {
+        x -> (x :: Dict) && x.keys().all?(p -> (p.0 :: K) && (p.1 :: V))
+    }
+}
+
+class String : Iterable[String], IntoPtr[Int] {
+    init(x) {
+        return ::str(x)
+    }
+
+    upper() -> String;
+    lower() -> String;
+
+    title() -> String {
+        self.sub(/(?<=[\s\-_]|^)./, &upper)
+    }
+
+    comb(pattern: String | Regex) -> String;
+
+    split(offset: Int) -> (String, String);
+    split(pattern: RegexV, n: ?Int) -> [RegexMatch | String];
+    split(pattern: String | Regex, n: ?Int) -> [String];
+
+    bytes() -> [Int];
+    chars() -> [String];
+    words() -> [String];
+    lines() -> [String];
+
+    len() -> Int;
+    size() -> Int;
+    width() -> Int;
+
+    slice(i: Int, j: ?Int) -> String;
+    bslice(i: Int, j: ?Int) -> String;
+
+    to-i -> Int { ::int(self, 0) }
+
+    matches(pattern: RegexV) -> Array[RegexMatch];
+    matches(pattern: Regex[0]) -> Array[String];
+    matches(pattern: Regex[(1..)]) -> Array[Array[String]];
+    matches(pattern: Regex) -> Array[String | Array[String]];
+
+    scan(pattern: RegexV) -> Array[RegexMatch];
+    scan(pattern: Regex[0]) -> Array[String];
+    scan(pattern: Regex[(1..)]) -> Array[Array[String]];
+    scan(pattern: Regex) -> Array[Array[String] | String];
+
+    match(pattern: RegexV) -> RegexMatch;
+    match(pattern: Regex[0]) -> String | nil;
+    match(pattern: Regex[(1..)]) -> Array[String] | nil;
+    match(pattern: Regex) -> String | Array[String] | nil;
+
+    match?(pattern: Regex) -> Bool;
+    count(pattern: String | Regex) -> Int;
+
+    search(pattern: String | Regex, off: ?Int) -> Int | nil;
+    searchr(pattern: String | Regex, off: ?Int) -> Int | nil;
+
+    bsearch(pattern: String | Regex, off: ?Int) -> Int | nil;
+    bsearchr(pattern: String | Regex, off: ?Int) -> Int | nil;
+
+    repeat(n: Int) -> String;
+
+    int(base: Int = 10) {
+        ::int(self, base)
+    }
+
+    str()  -> String { self }
+    str!() -> String { self }
+
+    __ptr__() -> Ptr[Int] {
+        self.ptr()
+    }
+
+    cstr() -> String;
+
+    center(n: Int, ch: String = ' ') {
+        "{self:^{ch}{n}}"
+    }
+
+    reverse() {
+        return chars().reverse!().sum() ?? ''
+    }
+
+    num? {
+        return match?(/^\d+(?:\.\d+)?$/)
+    }
+
+    ends?(end: String) -> Bool {
+        (end == '') || (bslice(-end.size()) == end)
+    }
+
+    starts?(start: String) -> Bool {
+        (bslice(0, start.size()) == start)
+    }
+
+    splice(i, j) {
+        slice(i, j - i)
+    }
+
+    bsplice(i: Int, j: Int) -> String {
+        bslice(i, j - i)
+    }
+
+    [;;](i=0, j=#self, k: Int = 1) -> String {
+        if k != 1 {
+            throw ValueError('String slicing with step is not supported')
+        }
+        slice(i, j)
+    }
+
+    lower?() {
+        self == lower()
+    }
+
+    upper?() {
+        self == upper()
+    }
+
+    trim() {
+        comb(/^\s+|\s+$/)
+    }
+
+    trimRight() {
+        comb(/\s+$/)
+    }
+
+    trimLeft() {
+        comb(/^\s+/)
+    }
+
+    strip() {
+        comb(/^\s+|\s+$/)
+    }
+
+    stripRight() {
+        comb(/\s+$/)
+    }
+
+    stripLeft() {
+        comb(/^\s+/)
+    }
+
+    unhex() {
+        let b = Blob()
+
+        fn _int(x, base: ?Int = 0) -> Int | nil { ::int(x, base) }
+
+        for octet in scan(/../) {
+            if let $x = _int(octet, 16) {
+                b.push(x)
+            } else {
+                return nil
+            }
+        }
+
+        return b
+    }
+
+    edit-distance(other) {
+        let a = self
+        let b = other
+
+        let D = [[0 for _ in ...#b] for _ in ...#a]
+
+        for i in ...#a {
+            D[i][0] = i
+        }
+
+        for j in ...#b {
+            D[0][j] = j
+        }
+
+        for i in ..#a {
+            for j in ..#b {
+                let cost = (a[i] == b[j]) ? 0 : 1
+
+                D[i + 1][j + 1] = ::min(
+                    D[i][j + 1] + 1,
+                    D[i + 1][j] + 1,
+                    D[i][j] + cost
+                )
+
+                if (i > 0 && j > 0 && a[i] == b[j - 1] && b[j] == a[i - 1]) {
+                    D[i + 1][j + 1] = ::min(
+                        D[i + 1][j + 1],
+                        D[i - 1][j - 1] + 1
+                    )
+                }
+            }
+        }
+
+        D[#a][#b]
+    }
+
+    __count__() {
+        (ord(self)..).map(chr)
+    }
+
+    [](i: Int) -> String {
+        self[i]
+    }
+
+    -(end: String) -> String {
+        self.slice(0, -#end if end == self.slice(-#end))
+    }
+
+    +(other: String) -> String {
+        self + other
+    }
+
+    __iter__*() -> Generator[String] {
+        for c in chars() {
+            yield c
+        }
+    }
+
+    __fmt__(spec, w, fun=id) {
+        fun(
+            spec.match?(/[%[:alpha:]](?![<^>])/)
+          ? fmt("%{spec}", w if '*' in spec, self)
+          : fmt("%{spec}s", w if '*' in spec, self)
+        )
+    }
+}
+
+class Int : IntoPtr[_] {
+    static MAX: Int =  9223372036854775807
+    static MIN: Int = -9223372036854775808
+
+    init(x: Any);
+
+    **(x: Float | Int) -> Float | Int {
+        type(x)(math.pow(self, x))
+    }
+
+    ~() -> Int {
+        bit.complement(self)
+    }
+
+    upto*(b: Int) -> Generator[Int] {
+        while self <= b {
+            yield self++
+        }
+    }
+
+    downto*(b: Int) -> Generator[Int] {
+        while self >= b {
+            yield self--
+        }
+    }
+
+    `..`(b: Int) -> Range {
+        self..b
+    }
+
+    `...`(b: Int) -> InclusiveRange {
+        self...b
+    }
+
+    even? -> Bool {
+        (self % 2) == 0
+    }
+
+    odd? -> Bool {
+        (self % 2) == 1
+    }
+
+    sgn -> Int {
+        self <=> 0
+    }
+
+    float -> Float {
+        ::float(self)
+    }
+
+    str(base: Int = 10) -> String {
+        match base {
+            2  => fmt('%b', self),
+            8  => fmt('%o', self),
+            10 => fmt('%d', self),
+            16 => fmt('%x', self),
+
+            _  => do {
+                let digits = '0123456789ABCDEF'
+
+                let s = ''
+                let k = abs
+
+                while k != 0 || #s == 0 {
+                    s = digits[k % base] + s
+                    k /= base
+                }
+
+                (self < 0) ? ('-' + s) : s
+            }
+        }
+    }
+
+    count*(k: Int = 1) -> Generator[Int] {
+        while true {
+            yield self
+            self += k
+        }
+    }
+
+    __count__*() -> Generator[Int] {
+        while true { yield self++ }
+    }
+
+    __iter__*() -> Generator[Int] {
+        while true { yield self++ }
+    }
+
+    __ptr__() -> Ptr[_] {
+        ptr.from-int(self)
+    }
+
+    neg -> Int {
+        -self
+    }
+
+    sub(n) -> Int {
+        self - n
+    }
+
+    add(n) -> Int {
+        self + n
+    }
+
+    mul(n) -> Int {
+        self * n
+    }
+
+    div(n) -> Int {
+        self / int(n)
+    }
+
+    `mod`(n) {
+        self % int(n)
+    }
+
+    in?(x) -> Bool {
+        self in x
+    }
+
+    abs -> Int {
+        ::abs(self)
+    }
+
+    pred -> Int {
+        self - 1
+    }
+
+    succ -> Int {
+        self + 1
+    }
+
+    sqrt -> Float {
+        math.sqrt(self)
+    }
+
+    zero? -> Bool {
+        self == 0
+    }
+
+    nonZero? -> Bool {
+        self != 0
+    }
+
+    positive? -> Bool {
+        self > 0
+    }
+
+    negative? -> Bool {
+        self < 0
+    }
+
+    clamp(low: Int, high: Int) -> Int {
+        min(max(self, low), high)
+    }
+
+    clamp(range: Range) -> Int {
+        clamp(range.low(), range.high())
+    }
+
+    range(start, end) -> Range {
+        (self + start)...(self + end)
+    }
+
+    __fmt__(spec: String, w: Int, n: ?Int) {
+        if spec.match?(/[%[:alpha:]]/) {
+            fmt("%{spec}", (n ?? w) if '*' in spec, self)
+        } else {
+            fmt("%{spec}d", (n ?? w) if '*' in spec, self)
+        }
+    }
+}
+
+class Float {
+    init(x) {
+        float(x)
+    }
+
+    **(b: Int | Float) -> Float {
+        return math.pow(self, b)
+    }
+
+    negate() {
+        -self
+    }
+
+    sub(n) {
+        self - n
+    }
+
+    add(n) {
+        self + n
+    }
+
+    mul(n) {
+        self * n
+    }
+
+    nan? -> Bool {
+        math.nan?(self)
+    }
+
+    abs -> Float {
+        ::abs(self)
+    }
+
+    sqrt -> Float {
+        math.sqrt(self)
+    }
+
+    floor -> Int {
+        ::floor(self)
+    }
+
+    ceil -> Int {
+        ::ceil(self)
+    }
+
+    round -> Float {
+        ::round(self)
+    }
+
+    iround -> Int {
+        ::iround(self)
+    }
+
+    clamp(low: Float | Int, high: Float | Int) -> Float {
+        if self < float(low) {
+            float(low)
+        } else if self > float(high) {
+            float(high)
+        } else {
+            self
+        }
+    }
+
+    clamp(range: Range) -> Float {
+        clamp(range.low(), range.high())
+    }
+
+    __fmt__(spec, w, n) {
+        if spec.match?(/[%[:alpha:]]/) {
+            fmt("%{spec}", (n ?? w) if '*' in spec, self)
+        } else {
+            fmt("%{spec}f", (n ?? w) if '*' in spec, self)
+        }
+    }
+
+    str(prec: ?Int) -> String {
+        if prec == nil {
+            ::str(self)
+        } else {
+            "{self:.{prec}}"
+        }
+    }
+
+    int -> Int {
+        ::int(self)
+    }
+
+    +(k: Float) -> Float { self + k }
+    +(x: Int) -> Float { self + x }
+
+    -(k: Float) -> Float { self - k }
+    -(x: Int) -> Float { self - x }
+
+    *(k: Float) -> Float { self * k }
+    *(x: Int) -> Float { self * x }
+
+    `/`(k: Float) -> Float { self / k }
+    `/`(x: Int) -> Float { self / x }
+
+    %(k: Int) -> Float { self % k }
+    %(x: Float) -> Float { self % x }
+}
+
+class Blob : Iterable[Int], IntoPtr[Int] {
+    init(*args: Any);
+
+    searchr(s: String) -> Int | nil {
+        for let off = size() - 1; off >= 0; --off {
+            if let $i = search(off, s) {
+                return i
+            }
+        }
+    }
+
+    base64() -> String {
+        base64::encode(self)
+    }
+
+    __iter__*() -> Generator[Int] {
+        for x in self {
+            yield x
+        }
+    }
+
+    [](i: Int) -> Int;
+    []=(i: Int, byte: Int) -> Int;
+
+    size() -> Int;
+    #() -> Int;
+
+    pad(n: Int, c: Int = 0) -> nil;
+
+    search(needle: Int | String | Blob) -> Int | nil;
+    search(off: Int, needle: Int | String | Blob) -> Int | nil;
+
+    str(i: ?Int = 0, n: ?Int = #self) -> String;
+    str!(i: ?Int = 0, n: ?Int = #self) -> String;
+
+    splice(i: ?Int = 0, n: Int = #self) -> Blob;
+
+    set(i: Int, byte: Int) -> nil;
+}
+
+class Bool {
+    init(x) {
+        return bool(x)
+    }
+
+    __not__() { return !self }
+}
+
+class Regex < Function {
+    init(x) { regex(x) }
+
+    ~=(s) { s.match(self) }
+
+    test(s) { s.match?(self) }
+
+    exec(s) { s.match(self) }
+
+    __match__(s) {
+        (s :: String) && s.match?(self)
+    }
+}
+
+class RegexV < Regex {
+}
+
+trait IntoPtr[T] {
+    __ptr__() -> Ptr[T];
+
+    static [](x) {
+        self
+    }
+}
+
+class Ptr[T] : IntoPtr[T] {
+    init(x: IntoPtr[T]) -> Ptr[T] {
+        x.__ptr__()
+    }
+
+    [](i: Int) -> T;
+    []=(i: Int, x: T) -> T;
+
+    +(off: Int | Bool) -> Ptr[T];
+    -(off: Int | Bool) -> Ptr[T];
+
+    -(other: Ptr[T]) -> Int;
+
+    __ptr__() -> Ptr[T] {
+        self
+    }
+
+    static [](x) {
+        self
+    }
+
+    as[U](type: CType[U]) -> Ptr[U] {
+        ptr.typed(self, type)
+    }
+}
+
+class Generator[T, S] : Iter[T] {
+    init*(f) {
+        while let Some(x) = f() {
+            yield x
+        }
+    }
+
+    __next__() -> Some[T] | None where S: nil {
+        self()
+    }
+
+    __call__(arg: S) -> Some[T] | None {
+        self(arg if arg != nil)
+    }
+
+    static [](T) {
+        x -> (x :: Generator)
+    }
+}
+
+class Module {
+    init(name: String) -> Module;
+
+    static list -> Array[Module] {
+        ty.mod.list()
+    }
+
+    name -> String { ty.mod.name(self) }
+    path -> String { ty.mod.path(self) }
+
+    dict -> Dict[String, _] {
+        ty.mod.dict(self)
+    }
+
+    imports -> Dict[String, Module] {
+        ty.mod.imports(self)
+    }
+
+    __missing__(name) {
+        if let $x = ty.mod.lookup(self, name) {
+            x
+        } else {
+            throw RuntimeError("module '{self.name}' has no member '{name}'")
+        }
+    }
+}
+
+class Tag < Function {
+    [](T) {
+        x -> do {
+            match x {
+                %_(x) => x :: T,
+                _     => false
+            }
+        }
+    }
+
+    static [](T) {
+        x -> do {
+            match x {
+                %_(x) => x :: T,
+                _     => false
+            }
+        }
+    }
+}
+
+class Tuple[...T] {
+    init(*args, %kwargs) {
+        tuple(*args, **kwargs)
+    }
+
+    __str___() {
+        str(self)
+    }
+
+    static named?(x: _) -> Bool {
+        members(x).keys().any?(\_ !:: Int)
+    }
+
+    %.*(f) {
+        let xs = [*self]
+        tuple(f(xs.0), *xs[1;])
+    }
+
+    .%.*(f) {
+        let xs = [*self]
+        tuple(xs.0, f(xs.1), *xs[2;])
+    }
+
+    ..%.*(f) {
+        let xs = [*self]
+        tuple(xs.0, xs.1, f(xs.2), *xs[3;])
+    }
+
+    %(f: Function) {
+        tuple(*[*self].map(f))
+    }
+
+    %(fs) {
+        if Tuple.named?(self) {
+            let myMembers: Dict[String, _] = members(self)
+            let tMembers: Dict[String, _] = members(fs)
+
+            for k, (v: _) in tMembers {
+                if let $c = myMembers[k] {
+                    myMembers[k] = (c.?isTuple() && v.?isTuple()) ? (c % v) : v(c)
+                } else {
+                    myMembers[k] = v(nil)
+                }
+            }
+
+            tuple(**myMembers)
+        } else {
+            tuple(*[*fs].zip-with(\_(_), [*self]))
+        }
+    }
+
+    isTuple() {
+        true
+    }
+
+    [](i: Int) -> _ {
+        self[i]
+    }
+
+    __drop__() {
+        for x in cast(self) {
+            x.?__drop__()
+        }
+    }
+
+    __match__(t) {
+        let myMembers = members(self)
+
+        if not let $tMembers = members(t) {
+            return false
+        }
+
+        if #myMembers.diff(tMembers) != 0 {
+            return false
+        }
+
+        for k, v in tMembers {
+            if !(v :: myMembers[k]) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    __iter__() -> Iter[_];
+}
+
+class BaseException {
+    what -> String;
+
+    __str__() -> String {
+        "{Class.name(type(self))}: {what}"
+    }
+}
+
+class CompileError < BaseException {}
+
+class RuntimeError < BaseException {
+    __what:  String
+    __ctx:   _
+    __cause: _
+
+    init(what: String) {
+        __what = what
+    }
+
+    what  { __what  }
+    cause { __cause }
+    bt    { __ctx   }
+
+    trace() { (__ctx = ty.trace()) }
+}
+
+class ValueError     < RuntimeError {}
+class AssertionError < RuntimeError {}
+
+class TimeoutError < RuntimeError {
+    init() {
+        super('Operation timed out')
+    }
+}
+
+class CanceledError < RuntimeError {
+    init() {
+        super('Operation canceled')
+    }
+}
+
+class OSError < RuntimeError {
+    __code: Int
+    __ctx:  String | nil
+
+    init(what: ?String = nil, code: ?Int = nil) {
+        __code = code ?? errno.get()
+        __ctx = what
+    }
+
+    what -> String {
+        match __ctx {
+            $ctx => "{ctx}: {errno.str(__code)}",
+            _    => errno.str(__code)
+        }
+    }
+
+    code -> Int {
+        __code
+    }
+}
+
+tag MatchError;
+tag IndexError;
+tag DispatchError;
+tag ZeroDivisionError;
+
+tag None {
+    static map(f)     { None  }
+    static flat-map() { None  }
+    static or-else(x) { x     }
+    static some?()    { false }
+}
+
+tag Some {
+         map(f) { Some(f(self)) }
+    flat-map(f) {      f(self)  }
+     or-else(x) {        self   }
+
+    some?() { true }
+
+    static from[T](x: T | nil) {
+        match x {
+            nil => None,
+            _   => Some(x)
+        }
+    }
+}
+
+tag Ok {
+     map(f) {
+          Ok(f(self))
+     }
+
+     flatMap(f) {
+          f(self)
+     }
+}
+
+tag Err {
+     __str__() { str(self) }
+     map()     { self }
+     flatMap() { self }
+}
+
+tag CType;
+
+use Maybe[T] = Some[T] | None
+
+class RegexMatch {
+    groups: Array[String | nil]
+    str: String
+
+    start -> Int {
+        #pre
+    }
+
+    end -> Int {
+        start + #groups[0]
+    }
+
+    pre -> String {
+        str.bslice(0, groups[0].ptr() - str.ptr())
+    }
+
+    post -> String {
+        str.bslice(groups[0].ptr() - str.ptr() + groups[0].size())
+    }
+
+    captures -> Array[String | nil] {
+        groups[1;]
+    }
+
+    [](i: 0) -> String {
+        cast(groups[0])
+    }
+
+    [](i: Int) -> String | nil {
+        groups[i]
+    }
+
+    #() -> Int {
+        #groups[0]
+    }
+}
+
+trait Iterable[T] {
+    map[U](f: T -> U) -> Generator[U] {
+        __iter__().map(f)
+    }
+
+    filter(f: T -> _) {
+        __iter__().filter(f)
+    }
+
+    reverse() {
+        __iter__().reverse()
+    }
+
+    any?(p) -> Bool {
+        __iter__().any?(p)
+    }
+
+    all?(p) -> Bool {
+        __iter__().all?(p)
+    }
+
+    list() {
+        __iter__().list()
+    }
+
+    uniq(f) {
+        __iter__().uniq(f)
+    }
+
+    take(n: Int) {
+        __iter__().take(n)
+    }
+
+    takeWhile(pred) {
+        __iter__().takeWhile(pred)
+    }
+
+    drop(n) {
+        __iter__().drop(n)
+    }
+
+    dropWhile(pred) {
+        __iter__().dropWhile(pred)
+    }
+
+    set() {
+        __iter__().set()
+    }
+
+    str() {
+        __iter__().str()
+    }
+
+    join(s) {
+        __iter__().join(s)
+    }
+
+    unlines() {
+        __iter__().unlines()
+    }
+
+    unwords() {
+        __iter__().unwords()
+    }
+
+    tally(f) {
+        __iter__().tally(f)
+    }
+
+    each(f) {
+        __iter__().each(f)
+    }
+
+    min(k: T -> Any = id) -> T | nil {
+        __iter__().min(k)
+    }
+
+    max(k: T -> Any = id) -> T | nil {
+        __iter__().max(k)
+    }
+
+    minmax(k=id) {
+        __iter__().minmax(k)
+    }
+
+    count(x) {
+        __iter__().count(x)
+    }
+
+    count-by(pred) {
+        __iter__().count-by(pred)
+    }
+
+    intersperse(x) {
+        __iter__().intersperse(x)
+    }
+
+    groupsOf(n: Int, keepShort: Bool = true) -> Generator[Array[T]] {
+        __iter__().groupsOf(n, keepShort=keepShort)
+    }
+
+    window[U](n: Int, f: (*T) -> U) -> Iterable[U] {
+        __iter__().window(n, f)
+    }
+
+    window(n: Int) -> Iterable[Array[T]] {
+        __iter__().window(n)
+    }
+
+    classify(f = id) {
+        __iter__().classify(f)
+    }
+
+    pad(n, x) {
+        __iter__().pad(n, x)
+    }
+
+    zip(*its, longest=false) {
+        __iter__().zip(*its, longest=longest)
+    }
+
+    zipWith(f, *its, longest=false) {
+        __iter__().zipWith(f, *its, longest=longest)
+    }
+
+    unzip(*args, %kwargs) {
+        __iter__().unzip(*args, **kwargs)
+    }
+
+    unzip2(*args, %kwargs) {
+        __iter__().unzip2(*args, **kwargs)
+    }
+
+    unzip3(*args, %kwargs) {
+        __iter__().unzip3(*args, **kwargs)
+    }
+
+    unzip4(*args, %kwargs) {
+        __iter__().unzip4(*args, **kwargs)
+    }
+
+    unzipWith(*args, %kwargs) {
+        __iter__().unzipWith(*args, **kwargs)
+    }
+
+    unzipWith2(*args, %kwargs) {
+        __iter__().unzipWith2(*args, **kwargs)
+    }
+
+    unzipWith3(*args, %kwargs) {
+        __iter__().unzipWith3(*args, **kwargs)
+    }
+
+    unzipWith4(*args, %kwargs) {
+        __iter__().unzipWith4(*args, **kwargs)
+    }
+
+    mean(f: T -> Int | Float = id) -> ?Float {
+        __iter__().mean(f)
+    }
+
+    median() -> T | nil where (T <=> T): Int {
+        __iter__().median()
+    }
+
+    sum() -> T | nil {
+        __iter__().sum()
+    }
+
+    sum(zero: T) -> T {
+        __iter__().sum(zero)
+    }
+
+    fold(f: (T, T) -> T) -> T | nil {
+        __iter__().fold(f)
+    }
+
+    fold[U](x: U, f: (U, T) -> U) -> U {
+        __iter__().fold(x, f)
+    }
+
+    group[U](f: T -> U) -> Generator[Array[T]] {
+        __iter__().group(f)
+    }
+
+    group() -> Generator[Array[T]] {
+        __iter__().group()
+    }
+
+    static chain(A, B) {
+        A.__iter__().chain(B)
+    }
+
+    chainAll[U]() -> Generator[U] where T: Iterable[U] {
+        __iter__().chainAll()
+    }
+
+    cycle() {
+        list().cycle()
+    }
+
+    repeat(n) {
+        __iter__().repeat(n)
+    }
+
+    all?(pred: T -> _ = id) {
+        __iter__().all?(pred)
+    }
+
+    interleave[U](xs: Iterable[U], long: Bool = false) -> Iterable[T | U] {
+        __iter__().interleave(xs, long)
+    }
+
+    enumerate() {
+        __iter__().enumerate()
+    }
+
+    find(pred: T -> Any) {
+        __iter__().find(pred)
+    }
+
+    first() {
+        __iter__().first()
+    }
+
+    >>*(f) {
+        f(*self)
+    }
+
+    #() {
+        #__iter__()
+    }
+
+    [](i: Int) -> T {
+        __iter__()[i]
+    }
+
+    __iter__() -> Iter[T];
+}
+
+trait Iter[T] < Iterable[T] {
+    __next__() -> Some[T] | None { None }
+
+    map*[U](f: T -> U) -> Generator[U] {
+        for x in self {
+            yield f(x)
+        }
+    }
+
+    map?*[U](f: T -> Some[U] | None) -> Generator[U] {
+        for x in self {
+            if let Some(y) = f(x) {
+                yield y
+            }
+        }
+    }
+
+    filter*(f: T -> Any) -> Generator[T] {
+        for x in self if f(x) {
+            yield x
+        }
+    }
+
+    keep*(p: T -> Any) -> Generator[T] {
+        for self if p(it) {
+            yield it
+        }
+    }
+
+    fold(f: (T, T) -> T) -> T | nil {
+        if not let Some(x) = __next__() {
+            return nil
+        }
+
+        while let Some(y) = __next__() {
+            x = f(x, y)
+        }
+
+        return x
+    }
+
+    fold[U](x: U, f: (U, T) -> U) -> U {
+        while let Some(y) = __next__() {
+            x = f(x, y)
+        }
+
+        return x
+    }
+
+    any?(p: _) -> Bool {
+        for x in self {
+            if p(x) {
+                return true
+            }
+        }
+        return false
+    }
+
+    all?(p: _) -> Bool {
+        for x in self {
+            if !p(x) {
+                return false
+            }
+        }
+        return true
+    }
+
+    #() {
+        let n = 0
+
+        for _ in self {
+            n += 1
+        }
+
+        return n
+    }
+
+    uniq*(f: _ = id) {
+        let seen = %{}
+        for x in self {
+            let y = f(x)
+            if y not in seen {
+                seen << y
+                yield x
+            }
+        }
+    }
+
+    unzipWith(f: _, n: _= nil) {
+        let lists = match n {
+            $n => [[] for ..n],
+
+            nil and let Some(f ~> t) = __next__()
+                and t :: Tuple
+               => [[x] for x in t],
+
+            _  => throw IndexError(self, 0)
+        }
+
+        for f ~> (t: _) in self {
+            for x, (i: _) in t {
+                lists[i].push(x)
+            }
+        }
+
+        return tuple(*lists)
+    }
+
+    unzipWith2(*args, %kwargs) {
+        unzipWith(*args, **kwargs, f=id, n=2)
+    }
+
+    unzipWith3(*args, %kwargs) {
+        unzipWith(*args, **kwargs, f=id, n=3)
+    }
+
+    unzipWith4(*args, %kwargs) {
+        unzipWith(*args, **kwargs, f=id, n=4)
+    }
+
+    unzip(*args, %kwargs) {
+        unzipWith(*args, **kwargs, f=id)
+    }
+
+    unzip2(*args, %kwargs) {
+        unzipWith(*args, **kwargs, f=id, n=2)
+    }
+
+    unzip3(*args, %kwargs) {
+        unzipWith(f=id, *args, **kwargs, f=id, n=3)
+    }
+
+    unzip4(*args, %kwargs) {
+        unzipWith(*args, **kwargs, f=id, n=4)
+    }
+
+    zipWith*(f, *its, longest=false) {
+        its.map!(&__iter__)
+        its.insert(0, self)
+
+        while true {
+            let group = []
+
+            for it in its {
+                group.push(it.__next__())
+            }
+
+            if group.all?(Some) || (group.any?(Some) && longest) {
+                yield f(*group.map!(x -> match x {
+                    None    => nil,
+                    Some(x) => x
+                }))
+            } else {
+                break
+            }
+        }
+    }
+
+    zip[...U](*ys: ...Iterable[U], longest: Bool = false) -> Generator[(T, U)] {
+        zip-with(tuple, *ys, longest=longest)
+    }
+
+    pad*(n, x) {
+        let i = 0
+        for x in self {
+            yield x
+            i += 1
+        }
+        while i < n {
+            yield x
+            i += 1
+        }
+    }
+
+    first() -> T {
+        for x in self {
+            return x
+        }
+    }
+
+    find[U](p: T -> U) -> T | nil {
+        for self if p(it) {
+            return it
+        }
+    }
+
+    group*[U](f: T -> U = id) -> Generator[Array[T]] {
+        if not let Some(x) = __next__() {
+            return None
+        }
+
+        let group = [x]
+        let key = f(x)
+
+        while true {
+            if not let Some(x) = __next__() {
+                break
+            }
+
+            let this-key = f(x)
+
+            if this-key == key {
+                group.push(x)
+            } else {
+                yield group
+                group = [x]
+                key = this-key
+            }
+        }
+
+        yield group
+    }
+
+    classify[U](key: (T -> U) = id) -> Dict[U, Array[T]] {
+        let d = %{*: []}
+
+        for x in self {
+            d[key(x)].push(x)
+        }
+
+        return d
+    }
+
+    window*(n: Int) -> Generator[Array[T]] {
+        let win = [*take(n)]
+        while #win == n {
+            yield win
+            break if not let Some(x) = __next__()
+            win.pop(0)
+            win.push(x)
+        }
+    }
+
+   window*[U](n: Int, f: (*T) -> U) -> Generator[U] {
+        let win = [*take(n)]
+        while #win == n {
+            yield f(*win)
+            win.pop(0)
+            if let Some(x) = __next__() {
+                win.push(x)
+            }
+        }
+    }
+
+    groupsOf*(n: Int, keepShort: Bool = true) -> Generator[Array[T]] {
+        while let xs = take(n).list() and (#xs > 0) {
+            if (#xs == n) || keepShort {
+                yield xs
+            }
+        }
+    }
+
+    join(sep: String = '') -> String {
+        if not let Some($s) = __next__() {
+            return ''
+        }
+
+        let b = Blob("{s}")
+
+        while let Some(s) = __next__() {
+            b.push("{sep}{s}")
+        }
+
+        return b.str()
+    }
+
+    unlines() -> String {
+        join('\n')
+    }
+
+    unwords() -> String {
+        join(' ')
+    }
+
+    count-by(pred) {
+        let n = 0
+
+        for x in self {
+            if pred(x) { n += 1 }
+        }
+
+        return n
+    }
+
+    count(x) {
+        let n = 0
+
+        if x :: (Function | Regex) {
+            for y in self {
+                if x(y) { n += 1 }
+            }
+        } else for y in self {
+            if x == y { n += 1 }
+        }
+
+        return n
+    }
+
+    interleave*[U](ys: Iterable[U], long: Bool = true) -> Iterable[T | U] {
+        let ys: Iter[U] = ys.__iter__()
+        for x in self {
+            yield x
+            if let Some(y) = ys.__next__() {
+                yield y
+            }
+        }
+        if long {
+            for y in ys {
+                yield y
+            }
+        }
+    }
+
+    list() -> Array[T] {
+        [x for x in self]
+    }
+
+    reverse() {
+        let xs = [x for x in self]
+        xs.reverse!()
+        for x in xs {
+            yield x
+        }
+    }
+
+    take*(n: Int) -> Generator[T] {
+        for i in ..n {
+            if let Some(x) = __next__() {
+                yield x
+            } else {
+                break
+            }
+        }
+    }
+
+    takeWhile*(pred) {
+        while let Some(x) = __next__() {
+            if pred(x) {
+                yield x
+            } else {
+                break
+            }
+        }
+    }
+
+    drop(n: Int) {
+        for _ in ..n { __next__() }
+        return self
+    }
+
+    dropWhile*(pred) {
+        while let Some(x) = __next__() {
+            if !pred(x) {
+                yield x
+                break
+            }
+        }
+        while let Some(x) = __next__() {
+            yield x
+        }
+    }
+
+    set() {
+        return %{ x for x in self }
+    }
+
+    str() -> String | nil {
+        if not let Some($s) = __next__() {
+            return nil
+        }
+
+        let b = Blob("{s}")
+
+        while let Some(s) = __next__() {
+            b.push("{s}")
+        }
+
+        return b.str()
+    }
+
+    tally(f = id) {
+        let d = %{*:0}
+        for x in self { d[f(x)] += 1 }
+        return d
+    }
+
+    each(f) {
+        for x in self { f(x) }
+    }
+
+    enumerate*() {
+        let i = 0
+        for x in self {
+            yield (i++, x)
+        }
+    }
+
+    max(k: T -> Any = id) -> T | nil {
+        if not let Some(x) = __next__() {
+            return nil
+        }
+
+        let m = x
+        let mKey = k(m)
+
+        while let Some(x) = __next__() {
+            let key = k(x)
+            if key > mKey {
+                m, mKey = x, key
+            }
+        }
+
+        return m
+    }
+
+    min(k: T -> Any = id) -> T | nil {
+        if not let Some(x) = __next__() {
+            return nil
+        }
+
+        let m = x
+        let mKey = k(m)
+
+        while let Some(x) = __next__() {
+            let key = k(x)
+            if key < mKey {
+                m, mKey = x, key
+            }
+        }
+
+        return m
+    }
+
+    minmax(k = id) {
+        if not let Some(x) = __next__() {
+            return nil
+        }
+
+        let max = x
+        let maxKey = k(x)
+
+        let min = max
+        let minKey = maxKey
+
+        while let Some(x) = __next__() {
+            let key = k(x)
+            if key < minKey {
+                min, minKey = x, key
+            } else if key > maxKey {
+                max, maxKey = x, key
+            }
+        }
+
+        return (min, max)
+    }
+
+    intersperse*[U](sep: U) -> Generator[T | U] {
+        let first = true
+
+        for x in self {
+            if !first {
+                yield sep
+            }
+
+            yield x
+
+            first = false
+        }
+    }
+
+    chainAll*[U]() -> Generator[U] where T: Iterable[U] {
+        for it in self {
+            for x in it.__iter__() {
+                yield x
+            }
+        }
+    }
+
+    static chain*(*its) {
+        for it in its {
+            for x in it.__iter__() {
+                yield x
+            }
+        }
+    }
+
+    cycle() {
+        return list().cycle()
+    }
+
+    repeat*(n) {
+        let xs = []
+
+        for x in self {
+            yield x
+            xs.push(x)
+        }
+
+        let i = 1
+
+        while i != n {
+            for x in xs { yield x }
+            i += 1
+        }
+    }
+
+    static replicate*[T](x: T, n: Int) -> Generator[T] {
+        for _ in ..n {
+            yield x
+        }
+    }
+
+    sum() -> T | nil {
+        if let Some(total) = __next__() {
+            for x in self {
+                total += x
+            }
+            total
+        } else {
+            nil
+        }
+    }
+
+    sum(zero: T) -> T {
+        sum() ?? zero
+    }
+
+    mean(f: T -> Int | Float = id) -> ?Float {
+        return [*self].mean(f)
+    }
+
+    median() -> T | nil where (T <=> T): Int {
+        list().median()
+    }
+
+    all?(pred: (T -> Any) = id) {
+        for x in self {
+            if x !:: pred { return false }
+        }
+        true
+    }
+
+    static tee[T](it: Iterable[T], n: Int = 2) -> (*Iterable[T]) {
+        let queues: [_] = [Queue() for _ in ..n]
+        let it = it.__iter__()
+
+        fn get() {
+            if let Some(x) = it.__next__() {
+                for queue in queues {
+                    queue.push(x)
+                }
+                return true
+            } else {
+                return false
+            }
+        }
+
+        fn go*(queue: _) {
+            while true {
+                if let Some(x) = queue.try-pop() {
+                    yield x
+                } else if !get() {
+                    return None
+                }
+            }
+        }
+
+        let generators = queues.map(go)
+
+        return tuple(*generators)
+    }
+
+    dict() {
+        %{ k: v for (k, v) in self }
+    }
+
+    [](i: Int) -> T {
+        for _ in 0.upto(i - 1) {
+            if __next__() == None { throw IndexError(self, i) }
+        }
+
+        if let Some(x) = __next__() {
+            return x
+        }
+    }
+
+    __iter__() -> Iter[T] { self }
+}
+
+class Queue[T] : Iterable[T] {
+    init();
+    push(*xs: T) -> Queue[T];
+    push-front(*xs: T) -> Queue[T];
+    pop() -> T;
+    pop-back() -> T;
+    peek() -> T;
+    peek-back() -> T;
+    try-pop() -> Some[T] | None;
+    try-pop-back() -> Some[T] | None;
+    try-peek() -> Some[T] | None;
+    try-peek-back() -> Some[T] | None;
+    len() -> Int;
+    empty? -> Bool;
+    clear() -> Queue[T];
+    to-array() -> Array[T];
+}
+
+class Range : Iterable[Int] {
+    a: Int
+    b: Int
+
+    init(a: Int, b: Int) {
+        self.a = a
+        self.b = b
+    }
+
+    low -> Int {
+        min(a, b)
+    }
+
+    high -> Int {
+        max(a, b) - 1
+    }
+
+    #() {
+        high - low + 1
+    }
+
+    __str__() {
+        "({a} .. {b})"
+    }
+
+    contains?(r: Range) -> Bool {
+        (r.low :: self) && (r.high :: self)
+    }
+
+    contains?(k) -> Bool {
+        k :: self
+    }
+
+    &(r: Range) -> Range {
+        if overlap?(r) {
+            Range(
+                max(self.low, r.low),
+                min(self.high, r.high) + 1
+            )
+        } else {
+            Range(0, 0)
+        }
+    }
+
+    |(r: Range) -> Range {
+        if overlap?(r) {
+            Range(
+                min(self.low, r.low),
+                max(self.high, r.high) + 1
+            )
+        } else {
+            throw ValueError('cannot union non-overlapping ranges')
+        }
+    }
+
+    overlap?(r: Range) -> Bool {
+        (high   in r)    || (low   in r)
+     || (r.high in self) || (r.low in self)
+    }
+
+    clamp(lo, hi) {
+        return Range(
+            min(hi, max(a, lo)),
+            max(lo, min(b, hi))
+        )
+    }
+
+    __match__(x) {
+        (x :: (Int | Float)) && (x >= low && x <= high)
+    }
+
+    has?(k) {
+        k :: self
+    }
+
+    has-all?(*ks) {
+        ks.all?(k -> k :: self)
+    }
+
+    <=>(r: Range) -> Int {
+        (low, high) <=> (r.low, r.high)
+    }
+
+    __iter__() -> Generator[Int] {
+        if a < b {
+            a.upto(b - 1)
+        } else {
+            (a - 1).downto(b)
+        }
+    }
+}
+
+class InclusiveRange < Range {
+    init(a: Int, b: Int) {
+        self.a = min(a, b)
+        self.b = max(a, b) + 1
+    }
+}
+
+class TupleSpec {
+    __types: Array[_]
+
+    init(types: Array[_]) {
+        __types = types
+    }
+
+    __match__(t: _) {
+        if t !:: Tuple {
+            return false
+        }
+
+        for (name, pred, req?), i in __types {
+            if name == nil {
+                if (#t <= i) || (t[i] !:: pred) {
+                    return false
+                }
+                continue
+            }
+            if let $val = t.?{name} {
+                if val !:: pred {
+                    return false
+                }
+            } else if req? {
+                return false
+            }
+        }
+
+        true
+    }
+}
+
+fn +(n: Int, range: Range) {
+    type(range)(
+        range.a + n,
+        range.b + n
+    )
+}
+
+fn +(range: Range, n: Int) {
+    type(range)(
+        range.a + n,
+        range.b + n
+    )
+}
+
+fn -(n: Int, range: Range) {
+    type(range)(
+        n - range.a,
+        n - range.b
+    )
+}
+
+fn -(range: Range, n: Int) {
+    type(range)(
+        range.a - n,
+        range.b - n
+    )
+}
+
+use JSON = String
+         | Int
+         | Float
+         | Bool
+         | Array[JSON]
+         | Dict[String, JSON]
+         | nil
+
+fn json::parse(json: String) -> JSON;
+fn json::parse[T](schema: Type[T], json: String) -> T;
+fn json::encode(value: Any) -> String;
+
+fn id[T](x: T) -> T { x }
+
+fn len(xs) {
+    #xs
+}
+
+fn zip(*xs) {
+    match xs {
+        [x, *xs] => x.zip(*xs),
+        []       => []
+    }
+}
+
+fn onExit(f) {
+    __EXIT_HOOKS__.push(f)
+}
+
+fn printf(*args, %kwargs) {
+    print(fmt(*args), **kwargs)
+}
+
+fn uuid4() {
+    let b = Blob(*[rand(256) for _ in ..16])
+
+    b.set(6, 0x40 | (b[6] & 0x0F))
+    b.set(8, 0xA0 | (b[8] & 0x3F))
+
+    let hex = b.hex()
+
+    "{hex[0;8]}-{hex[8;4]}-{hex[12;4]}-{hex[16;4]}-{hex[20;12]}"
+}
+
+fn uuid7() {
+    let b = Blob(*[rand(256) for _ in ..16])
+
+    b.set(6, 0x70 | (b[6] & 0x0F))
+    b.set(8, 0x80 | (b[8] & 0x3F))
+
+    let t = time.utime() / 1000
+
+    b[0] = (t >> 40)
+    b[1] = (t >> 32)
+    b[2] = (t >> 24)
+    b[3] = (t >> 16)
+    b[4] = (t >>  8)
+    b[5] = (t >>  0)
+
+    let hex = b.hex()
+
+    "{hex[0;8]}-{hex[8;4]}-{hex[12;4]}-{hex[16;4]}-{hex[20;12]}"
+}
+
+class BaseLock {
+    __lock: _
+
+    init(lock: _) {
+        __lock = lock
+    }
+
+    inner -> _ {
+        __lock
+    }
+
+    lock() {
+        thread.lock(__lock)
+        return LockGuard(__lock)
+    }
+
+    tryLock() {
+        if thread.tryLock(__lock) {
+            return LockGuard(__lock)
+        }
+    }
+
+    unlock() {
+        thread.unlock(__lock)
+    }
+
+    destroy() {
+        thread.destroy(__lock)
+        __lock = nil
+    }
+
+    __free__() {
+        thread.destroy(__lock)
+    }
+
+    __enter__() {
+        thread.lock(__lock)
+        self
+    }
+
+    __drop__() {
+        thread.unlock(__lock)
+    }
+}
+
+class Mutex < BaseLock {
+    init() {
+        super(thread.mutex())
+    }
+}
+
+class SpinLock < BaseLock {
+    init() {
+        super(thread.spinLock())
+    }
+}
+
+class LockGuard {
+    __lock: _
+
+    init(lock) {
+        __lock = lock
+    }
+
+    __drop__() {
+        thread.unlock(__lock)
+    }
+
+    unlocked() {
+        thread.unlock(__lock)
+        UnlockGuard(__lock)
+    }
+}
+
+class UnlockGuard {
+    __lock: _
+
+    init(lock) {
+        __lock = lock
+    }
+
+    __drop__() {
+        thread.lock(__lock)
+    }
+}
+
+class Channel {
+    chan: _
+
+    init() {
+        chan = thread.channel()
+    }
+
+    send(x) {
+        thread.send(chan, x)
+    }
+
+    recv(timeoutMs: ?Int) {
+        thread.recv(chan, timeoutMs if timeoutMs != nil)
+    }
+
+    close() {
+        thread.close(chan)
+    }
+}
+
+class Atomic : IntoPtr[Int] {
+    __x: Ptr
+
+    init(x: Int = 0) {
+        __x = thread.atomic(x)
+    }
+
+    load() -> Int {
+        thread.load(__x)
+    }
+
+    store(x: Int) -> Int {
+        thread.store(__x, x)
+    }
+
+    swap(y: Int) -> Int {
+        thread.swap(__x, y)
+    }
+
+    try-swap(old: Int, new: Int) -> Ok[Int] | Err[Int] {
+        thread.try-swap(__x, old, new)
+    }
+
+    fetch-add(y: Int) -> Int {
+        thread.fetch-add(__x, y)
+    }
+
+    fetch-sub(y: Int) -> Int {
+        thread.fetch-sub(__x, y)
+    }
+
+    <=>[U](y: U) -> Int where (Int <=> U): Int {
+        load() <=> y
+    }
+
+    +=(y: Int) {
+        thread.fetch-add(__x, y)
+    }
+
+    -=(y: Int) {
+        thread.fetch-sub(__x, y)
+    }
+
+    __str__() {
+        "{load()}"
+    }
+
+    __fmt__(*args: _) {
+        load().__fmt__(*args)
+    }
+
+    __repr__() {
+        "Atomic({load()})"
+    }
+}
+
+class Sync[T] {
+    __x: T
+    __mtx: Mutex
+
+    init(x: T, mutex = Mutex()) {
+        __x = x
+        __mtx = mutex
+    }
+
+    static of[T](x: T) -> T & Sync[T] {
+        cast(Sync(x))
+    }
+
+    static swap[T](x: Sync[T], y: T) {
+        with x.__mtx {
+            let old = x.__x
+            x.__x = y
+            old
+        }
+    }
+
+    static read[T](x: Sync[T]) -> T {
+        with x.__mtx {
+            x.__x
+        }
+    }
+
+    static get(x) {
+        x.__x
+    }
+
+    static set[T](x: Sync[T], y: T) {
+        with x.__mtx {
+            x.__x = y
+        }
+    }
+
+    static lock(x, y) {
+        x.__mtx.lock()
+    }
+
+    __missing__(name) {
+        with __mtx { __x.{name} }
+
+    }
+
+    __method_missing__(name, *args) {
+        with __mtx {
+            __x.{name}(*args)
+        }
+    }
+
+    ==(y) {
+        with __mtx {
+            __x == y
+        }
+    }
+
+    <=>(y) {
+        with __mtx {
+            __x <=> y
+        }
+    }
+
+    #() {
+        with __mtx {
+            #__x
+        }
+    }
+
+    __str__() {
+        "{__x}"
+    }
+
+    [][I, U](i: I) -> U where T: Subscript[I, U] {
+        with __mtx {
+            __x[i]
+        }
+    }
+
+    []=[I, U](i: I, u: U) -> U where T: Subscript[I, U] {
+        with __mtx {
+            __x[i] = u
+        }
+    }
+
+    ++() {
+        with __mtx {
+            ++(__x)
+        }
+    }
+
+
+    --() {
+        with __mtx {
+            --(__x)
+        }
+    }
+
+    +=(y) {
+        with __mtx {
+            __x += y
+        }
+    }
+
+    +[A, B](y: A) -> B where (T + A): B {
+        with __mtx {
+            __x + y
+        }
+    }
+
+    *[A, B](y: A) -> B where (T * A): B {
+        with __mtx {
+            __x * y
+        }
+    }
+
+    -=(y) {
+        with __mtx {
+            __x -= y
+        }
+    }
+
+    -[A, B](y: A) -> B where (T - A): B {
+        with __mtx {
+            __x - y
+        }
+    }
+
+    /=(y) {
+        with __mtx {
+            __x /= y
+        }
+    }
+
+    `/`[A, B](y: A) -> B where (T / A): B {
+        with __mtx {
+            __x / y
+        }
+    }
+
+    <[U](y: U) -> Bool where (T < U): Bool {
+        with __mtx {
+            __x < y
+        }
+    }
+
+    >[U](y: U) -> Bool where (T > U): Bool {
+        with __mtx {
+            __x > y
+        }
+    }
+
+    <=[U](y: U) -> Bool where (T <= U): Bool {
+        with __mtx {
+            __x <= y
+        }
+    }
+
+    >=[U](y: U) -> Bool where (T >= U): Bool {
+        with __mtx {
+            __x >= y
+        }
+    }
+
+    __fmt__(*args) {
+        with __mtx {
+            __x.__fmt__(*args)
+        }
+    }
+}
+
+class CondVar {
+    __var: _
+
+    init() {
+        __var = thread.cond()
+    }
+
+    destroy() {
+        thread.destroy(__var)
+        __var = nil
+    }
+
+    wait(mtx: Mutex, *timeout) {
+        thread.waitCond(__var, mtx.inner, *timeout)
+    }
+
+    signal() {
+        thread.signalCond(__var)
+    }
+
+    broadcast() {
+        thread.broadcastCond(__var)
+    }
+
+    inner -> _ {
+        __var
+    }
+
+    __free__() {
+        thread.destroy(__var)
+    }
+}
+
+class Note {
+    __note: _
+
+    init() {
+        __note = thread.note()
+    }
+
+    notify() {
+        thread.notify(__note)
+    }
+
+    wait(timeout: ?Float) {
+        thread.wait-note(__note, timeout if timeout != nil)
+    }
+
+    notified? -> Bool {
+        thread.notified?(__note)
+    }
+
+    inner -> _ {
+        __note
+    }
+
+    __free__() {
+        thread.destroy(__note)
+    }
+}
+
+class Thread[T] {
+    __handle: _
+
+    /**
+     * Thread(func, *args, isolated=false, name=nil)
+     *
+     * Call the specified fn with any provided arguments in a new thread.
+     *
+     * isolated: If isolated is true, the new thread will be in its own thread
+     *           group, and will not synchronize its garbage collection with
+     *           other threads. This can be useful if the thread is generating
+     *           little to no garbage and needs to avoid garbage collection
+     *           pauses.
+     *
+     *           NOTE A side effect of this is that references held by the new thread
+     *                to objects allocated in other thread groups will not keep those
+     *                objects alive. You must take care to avoid use-after-free bugs,
+     *                and use Channel to transfer objects between thread groups.
+     */
+    init[...Args](func: (Args -> T), *args: ...Args, %kwargs) {
+        __handle = thread.create(func, *args, **kwargs)
+    }
+
+    static getName(t=nil) -> String | nil {
+        thread.getName(t)
+    }
+
+    static kill(sig: Int) {
+        thread.kill(sig)
+    }
+
+    static wait-any(
+        objects: Array[Note | CondVar],
+        timeout: ?Float = nil,
+        lock: Mutex | Array[Mutex] | nil = nil
+    ) -> Int | nil {
+        thread.wait-any(
+            [it.inner for objects],
+            timeout,
+            lock if lock != nil
+        )
+    }
+
+    static wait-any(
+        objects: Array[Note | CondVar],
+        timeout: nil = nil,
+        lock: Mutex | Array[Mutex] | nil = nil
+    ) -> Int;
+
+    getName() -> String | nil {
+        thread.getName(__handle)
+    }
+
+    setName(name: String) {
+        thread.setName(name)
+    }
+
+    join() -> T {
+        thread.join(__handle)
+    }
+
+    join(timeoutMs: Int) -> Some[T] | None {
+        thread.join(__handle, timeoutMs)
+    }
+
+    kill(sig: Int) {
+        thread.kill(__handle, sig)
+    }
+
+    detach() {
+        thread.detach(__handle)
+    }
+
+    static id() -> Int {
+        thread.id()
+    }
+
+    id() -> Int {
+        thread.id(__handle)
+    }
+}
+
+macro static!(e) = do {
+    $${ty.eval(e)} as (typeof $$e)
+}
+
+macro print!(*xs) {
+    let xs = ty.Array([ty.ArrayItem(item: x) for x in xs])
+    ty.CompileTime($$[ do { print(*$$xs, sep=' '); nil } $$])
+}
+
+macro showCode {
+    let e = parse.stmt(0)
+    print(e)
+    e
+}
+
+macro matches?(e, p) {
+    if p != nil {
+        $$[
+            match $$e {
+                $$p => true,
+                _   => false
+            }
+        $$]
+    } else {
+        $$[
+            (match {
+                $$e => true,
+                _   => false
+            })
+        $$]
+    }
+}
+
+macro dbg(*args) {
+    if #args == 0 {
+        return $$[ nil $$]
+    }
+
+    let results = ty.gensym()
+    let decl    = ty.Id(name: results, constraint: $$[ Array[_] $$])
+
+
+    let pp? = ty.IfDef(name: 'Printer', module: 'pretty')
+    let pp  = $$[ $$pp?.map(\__().print(_)).or-else($${::show}) $$]
+
+    ty.Block([
+        $$[ let $$decl = [] $$],
+        *[
+            $$[ $$results.push(($$e, $$(ty.String(parse.show(e))))) $$]
+            for e, i in args
+        ],
+        $$[
+            let maxw = $$results.map(\#_.1).max()
+            let show = $$pp
+
+            for (r, src) in $$results {
+                eprint(
+                    "{__module__                          }:"
+                    "{__func__ ?? '(top)'                 }:"
+                    "{__line__                           }: "
+                    "{$${fmt}('%*s', maxw, src)} = {show(r)}",
+                    flush=true
+                 )
+            }
+
+            $$results[-1].0
+        $$]
+    ])
+}
+
+macro time! {
+    // (
+    lex.next()
+
+    let e = parse.stmt(0)
+
+    // )
+    lex.next()
+
+    $$[
+        do {
+            let (s: _, x, e: _) = ($${time::now}(), $$(e), $${time::now}())
+
+            if (e - s) > 0.1 {
+                eprint(
+                    __module__,
+                    ':',
+                    __line__,
+                    ': ',
+                    $$(ty.String(parse.show(e))),
+                    ": {(e - s):.4}s",
+                    sep=''
+                )
+            }
+
+            x
+        }
+    $$]
+}
+
+macro timed(expr) {
+    $$[
+        do {
+            let (s: Float, x: _, e: Float) = ($${time::now}(), $$expr, $${time::now}())
+            ((e - s), x)
+        }
+    $$]
+}
+
+macro modify! {
+    fn path() {
+        let p = [lex.next().id]
+
+        while lex.peek().type == '.' {
+            lex.next()
+            p.push(lex.next().id)
+        }
+
+        p
+    }
+
+    fn convert(map: _) {
+        let entries = []
+
+        for k, v in map {
+            entries.push(
+                ty.RecordEntry(
+                    item: (v :: Dict) ? convert(v) : v,
+                    name: k
+                )
+            )
+        }
+
+        ty.Record(entries)
+    }
+
+
+    let record: _ = %{}
+
+    // {
+    lex.next()
+
+    while lex.peek().type != '}' {
+        let [*ps, field] = path()
+
+        // : or =
+        lex.next()
+
+        let e = ty.ImplicitFunc(body: parse.expr(0), params: [])
+
+        let d = record
+
+        for part in ps {
+            if part not in d {
+                d[part] = %{}
+            }
+            d = d[part]
+        }
+
+        d[field] = e
+
+        if lex.peek().type == ',' {
+            lex.next()
+        }
+    }
+
+    // }
+    lex.next()
+
+    convert(record)
+}
+
+macro enum! {
+    fn next-value(last: AST) -> (AST, AST) | nil {
+        while lex.peek().type == 'comment' { lex.next() }
+
+        if lex.peek().type != 'id' { return nil }
+
+        let name = parse.expr(99)
+
+        if lex.peek().type == '=' {
+            lex.next()
+            (name, parse.expr(0))
+        } else match last {
+            ty.Add(n, ty.Int(i))
+                => (name, ty.Add(n, ty.Int(i + 1))),
+            n   => (name, ty.Add(n, ty.Int(1)))
+        }
+    }
+
+    if lex.peek().type == '{' {
+        lex.next()
+
+        let vars = []
+        let i = ty.Int(-1)
+
+        while lex.peek().type != '}' and let (name, val) = next-value(i) {
+            vars.push(ty.Let(name, val, public: true))
+            if lex.peek().type == ',' lex.next()
+            i = val
+        }
+
+        lex.next()
+
+        ty.Multi(vars)
+    } else {
+        let name = lex.next().id
+
+        lex.next()
+
+        let entries = []
+        let i = ty.Int(-1)
+
+        while (lex.peek().type != '}') and let (e, val) = next-value(i) {
+            entries.push(ty.RecordEntry(item: val, name: e))
+            if lex.peek().type == ',' lex.next()
+            i = val
+        }
+
+        lex.next()
+
+        ty.Let(ty.Id(name: name), ty.Record(entries), public: true)
+    }
+}
+
+macro lock! {
+    let mtx = parse.expr(0)
+    let stmt = parse.stmt(0)
+    ty.With(
+        [ty.Let(
+            ty.Id(name: '_'),
+            ty.MethodCall(object: mtx, method: 'lock', args: [])
+        )],
+        stmt
+    )
+}
+
+macro sync! {
+    // (
+    lex.next()
+
+    let names = []
+
+    while lex.peek().type != ')' {
+        names.push(lex.next().id)
+        if lex.peek().type == ',' {
+            lex.next()
+        }
+    }
+
+    // )
+    lex.next()
+
+    let body = parse.stmt(0)
+
+    let locks = []
+    let defs = []
+
+    for name in names {
+        locks.push(
+            ty.Let(
+                ty.Id(name: '_'),
+                ty.Call(
+                    func: ty.Value(Sync.lock),
+                    args: [ty.Arg(arg: ty.Id(name: name))]
+                )
+            )
+        )
+        defs.push(
+            ty.Let(
+                ty.Id(name: name),
+                ty.Call(
+                    func: ty.Value(Sync.get),
+                    args: [ty.Arg(arg: ty.Id(name: name))]
+                )
+            )
+        )
+    }
+
+    ty.With(
+        locks,
+        ty.Block([
+            *defs,
+            body
+        ])
+    )
+}
+
+macro static_if {
+    let (ty.Expr ~> cond, _) = parse.expr(0, raw: true)
+
+    let (ty.Stmt ~> then, _) = parse.stmt(0, raw: true)
+
+    let otherwise = if lex.peek().type == 'else' {
+        lex.next()
+        ty.Stmt(parse.stmt(0, raw: true)[0])
+    }
+
+    ty.CompileTime(ty.If([cond], ty.Value(then), ty.Value(otherwise ?? ty.Nil)))
+}
+
+macro ifdef {
+    let v = lex.next()
+
+    let then = parse.stmt(0)
+
+    let otherwise = if lex.peek().type == 'else' {
+        lex.next()
+        parse.stmt(0)
+    }
+
+    ty.CompileTime(ty.If([ty.Defined(name: v.id, module: v.module)], ty.Value(then), ty.Value(otherwise ?? ty.Nil)))
+}
+
+class SharedQueue[T] {
+    init();
+    put(x: T) -> SharedQueue[T];
+    try-take(timeout: Int | Float = 0) -> Some[T] | None;
+    take() -> T;
+    peek() -> T;
+    try-peek() -> Some[T] | None;
+    len() -> Int;
+    empty? -> Bool;
+    clear() -> SharedQueue[T];
+    close() -> nil;
+    open? -> Bool;
+    to-array() -> Array[T];
+}
+
+class EqualTo[T] {
+    __x: T
+    init(x: T)   { __x = x  }
+    __match__(x) { __x == x }
+}
+
+class AnyOf {
+    __xs: Array[_]
+    init(*xs)    { __xs = xs }
+    __match__(x) { x in __xs }
+    __str__() {
+        ["{it}" for __xs].join(", ")
+    }
+}
+
+macro __walk! {
+    fn copySource(a: _, b: _) -> _ { ty.copySource(a, b) }
+    fn walk(tree: _, f: _) -> _ {
+        if tree == nil {
+            return nil
+        }
+
+        let tree = copySource(tree, match tree {
+            ty.Stop(tree) => tree,
+
+            ty.Id({name, ?module, ?constraint})
+                => ty.Id({name, module, constraint: walk(constraint, f)}),
+
+            ty.Array(xs) => ty.Array([walk(x, f) for x in xs]),
+
+            ty.ArrayItem(x) => ty.ArrayItem(
+                item: walk(x.item, f),
+                cond: walk(x.?cond, f),
+                optional: x.?optional
+            ),
+
+            ty.Call(call) => ty.Call(
+                func: walk(call.func, f),
+                args: [walk(arg, f) for arg in call.args]
+            ),
+
+            ty.Arg(arg) => ty.Arg(
+                arg: walk(arg.arg, f),
+                cond: walk(arg.?cond, f),
+                name: arg.?name
+            ),
+
+            ty.MethodCall(call) => ty.MethodCall(
+                object: walk(call.object, f),
+                args: [walk(arg, f) for arg in call.args],
+                method: call.method
+            ),
+
+            ty.Record(record) => ty.Record([walk(entry, f) for entry in record]),
+
+            ty.RecordEntry(entry) => ty.RecordEntry(
+                item: walk(entry.item, f),
+                name: entry.?name,
+                cond: walk(entry.?cond, f),
+                optional: entry.?optional
+            ),
+
+            ty.Add(a, b) => ty.Add(walk(a, f), walk(b, f)),
+            ty.Mul(a, b) => ty.Mul(walk(a, f), walk(b, f)),
+            ty.Div(a, b) => ty.Div(walk(a, f), walk(b, f)),
+            ty.Sub(a, b) => ty.Sub(walk(a, f), walk(b, f)),
+            ty.Mod(a, b) => ty.Mod(walk(a, f), walk(b, f)),
+            ty.LT(a, b)  => ty.LT(walk(a, f), walk(b, f)),
+            ty.LEQ(a, b) => ty.LEQ(walk(a, f), walk(b, f)),
+            ty.GT(a, b)  => ty.GT(walk(a, f), walk(b, f)),
+            ty.GEQ(a, b) => ty.GEQ(walk(a, f), walk(b, f)),
+            ty.Cmp(a, b) => ty.Cmp(walk(a, f), walk(b, f)),
+
+            ty.Xor(a, b) => ty.Xor(walk(a, f), walk(b, f)),
+            ty.BitAnd(a, b) => ty.BitAnd(walk(a, f), walk(b, f)),
+            ty.BitOr(a, b)  => ty.BitOr(walk(a, f), walk(b, f)),
+            ty.Shl(a, b)    => ty.Shl(walk(a, f), walk(b, f)),
+            ty.Shr(a, b)    => ty.Shr(walk(a, f), walk(b, f)),
+
+            ty.In(   a, b) => ty.In(   walk(a, f), walk(b, f)),
+            ty.NotIn(a, b) => ty.NotIn(walk(a, f), walk(b, f)),
+
+            ty.DotDot(   a, b) => ty.DotDot(   walk(a, f), walk(b, f)),
+            ty.DotDotDot(a, b) => ty.DotDotDot(walk(a, f), walk(b, f)),
+
+            ty.FuncDef(     func),
+            ty.Func(        func),
+            ty.ImplicitFunc(func) => type(tree)(
+                name: func.?name,
+                decorators: [walk(it, f) for func.?decorators ?? []],
+                params: [walk(it, f) for func.?params ?? []],
+                rt: walk(func.?rt, f),
+                body: walk(func.?body, f)
+            ),
+
+            ty.Param(param) => ty.Param(
+                name: param.name,
+                constraint: walk(param.?constraint, f),
+                default: walk(param.?default, f)
+            ),
+
+            ty.Class(c) => ty.Class(
+                name: c.name,
+                `super`: walk(c.?`super`, f),
+                methods: [walk(it, f) for c.?methods ?? []],
+                getters: [walk(it, f) for c.?getters ?? []],
+                setters: [walk(it, f) for c.?setters ?? []],
+                fields:  [walk(it, f) for c.?fields  ?? []],
+                static-methods: [walk(it, f) for c.?static-methods ?? []],
+                static-getters: [walk(it, f) for c.?static-getters ?? []],
+                static-fields:  [walk(it, f) for c.?static-fields  ?? []]
+            ),
+
+            ty.Cond(cond, a, b) => ty.Cond(
+                walk(cond, f),
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.If(conds, a, b) => ty.If(
+                [walk(cond, f) for cond in conds],
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.IfNot(conds, a, b) => ty.IfNot(
+                [walk(cond, f) for cond in conds],
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.Eq(a, b)    => ty.Eq(walk(a, f), walk(b, f)),
+            ty.NotEq(a, b) => ty.NotEq(walk(a, f), walk(b, f)),
+            ty.And(a, b)   => ty.And(walk(a, f), walk(b, f)),
+            ty.Or(a, b)    => ty.Or(walk(a, f), walk(b, f)),
+
+            ty.KwAnd(e, conds) => ty.KwAnd(
+                walk(e, f),
+                [walk(cond, f) for cond in conds]
+            ),
+
+            ty.UserOp(op, a, b) => ty.UserOp(
+                op,
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.MemberAccess(object, member) => ty.MemberAccess(
+                walk(object, f),
+                member
+            ),
+
+            ty.TryMemberAccess(object, member) => ty.TryMemberAccess(
+                walk(object, f),
+                member
+            ),
+
+            ty.DynMemberAccess(object, member) => ty.DynMemberAccess(
+                walk(object, f),
+                walk(member, f)
+            ),
+
+            ty.TryDynMemberAccess(object, member) => ty.TryDynMemberAccess(
+                walk(object, f),
+                walk(member, f)
+            ),
+
+            ty.Return(values) => ty.Return([walk(v, f) for v in values]),
+
+            ty.Yield(values) => ty.Yield([walk(v, f) for v in values]),
+
+            ty.Block(block) => ty.Block([walk(s, f) for s in block]),
+
+            ty.Multi(multi) => ty.Multi([walk(s, f) for s in multi]),
+
+            ty.While(conds, body) => ty.While(
+                [walk(c, f) for c in conds],
+                walk(body, f)
+            ),
+
+            ty.Each(each) => ty.Each(
+                pattern: [walk(p, f) for p in each.pattern],
+                iter: walk(each.iter, f),
+                expr: walk(each.expr, f),
+                `if`: walk(each.?`if`, f),
+                `while`: walk(each.?`while`, f)
+            ),
+
+            ty.For(init, cond, next, body) => ty.For(
+                walk(init, f),
+                walk(cond, f),
+                walk(next, f),
+                walk(body, f)
+            ),
+
+            ty.Match(subject, arms) => ty.Match(
+                walk(subject, f),
+                [(walk(pattern, f), walk(value, f)) for (pattern, value) in arms]
+            ),
+
+            ty.WhileMatch(subject, arms) => ty.WhileMatch(
+                walk(subject, f),
+                [(walk(pattern, f), walk(value, f)) for (pattern, value) in arms]
+            ),
+
+            ty.Defer(func) => ty.Defer(walk(func, f)),
+
+            ty.Eval(code) => ty.Eval(walk(code, f)),
+
+            ty.Throw(x) => ty.Throw(walk(x, f)),
+
+            ty.Try({body, catches, always}) => ty.Try(
+                body: walk(body, f),
+                catches: [(walk(p, f), walk(h, f)) for (p, h) in catches],
+                always: walk(always, f)
+            ),
+
+            ty.Break(b) => ty.Break(value: walk(b.value, f), depth: b.depth),
+
+            ty.Dict(dict) => ty.Dict(
+                items: [walk(item, f) for item in dict.items],
+                default: walk(dict.default, f)
+            ),
+
+            ty.DictItem(a, b) => ty.DictItem(
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.Subscript(xs, i) => ty.Subscript(
+                walk(xs, f),
+                walk(i, f)
+            ),
+
+            ty.Slice(xs, i, j, k) => ty.Slice(
+                walk(xs, f),
+                walk(i, f),
+                walk(j, f),
+                walk(k, f)
+            ),
+
+            ty.Generator(gen) => ty.Generator(walk(gen, f)),
+
+            ty.ArrayCompr({items, pattern, iter, ?`if`, ?`while`, ?`where`}) => ty.ArrayCompr(
+                items: [walk(item, f) for item in items],
+                iter: walk(iter, f),
+                pattern: walk(pattern, f),
+                `while`: walk(`while`, f),
+                `if`: walk(`if`, f),
+                `where`: walk(`where`, f)
+            ),
+
+            ty.DictCompr({items, pattern, default, iter, ?`if`, ?`while`, ?`where`}) => ty.DictCompr(
+                items: [walk(item, f) for item in items],
+                iter: walk(iter, f),
+                default: walk(default, f),
+                pattern: walk(pattern, f),
+                `while`: walk(`while`, f),
+                `if`: walk(`if`, f),
+                `where`: walk(`where`, f)
+            ),
+
+            ty.Spread(spread) => ty.Spread(walk(spread, f)),
+            ty.Splat (splat)  => ty.Splat (walk(splat, f)),
+
+            ty.Count(xs) => ty.Count(walk(xs, f)),
+
+            ty.Question(xs) => ty.Question(walk(xs, f)),
+
+            ty.Not(x) => ty.Not(walk(x, f)),
+            ty.Neg(x) => ty.Neg(walk(x, f)),
+
+            ty.PreInc (x) => ty.PreInc (walk(x, f)),
+            ty.PostInc(x) => ty.PostInc(walk(x, f)),
+            ty.PreDec (x) => ty.PreDec (walk(x, f)),
+            ty.PostDec(x) => ty.PostDec(walk(x, f)),
+
+            ty.Let(target, x) => ty.Let(
+                walk(target, f),
+                walk(x, f)
+            ),
+
+            ty.Assign(target, x) => ty.Assign(
+                walk(target, f),
+                walk(x, f)
+            ),
+
+            ty.With(bindings, body) => ty.With(
+                [walk(binding, f) for binding in bindings],
+                walk(body, f)
+            ),
+
+            ty.SpecialString(parts) => ty.SpecialString(
+                parts.map(match {
+                    (e, fmt, w, x) => (walk(e, f), walk(fmt, f), w, walk(x, f)),
+                    e              => walk(e, f),
+                })
+            ),
+
+            ty.LangString(lang, parts) => ty.LangString(
+                walk(lang, f),
+                parts.map(match {
+                    (e, fmt, w, x) => (walk(e, f), walk(fmt, f), w, walk(x, f)),
+                    e              => walk(e, f),
+                })
+            ),
+
+            ty.Wtf(a, b) => ty.Wtf(
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.Matches(a, b) => ty.Matches(
+                walk(a, f),
+                walk(b, f)
+            ),
+
+            ty.TagPattern(id, pattern) => ty.TagPattern(
+                id,
+                walk(pattern, f)
+            ),
+
+            ty.Tagged(t, *xs) => ty.Tagged(
+                walk(t, f),
+                *(walk(x, f) for x in xs)
+            ),
+
+            ty.Union(types) => ty.Union([walk(t0, f) for t0 in types]),
+
+            ty.View(view, pattern) => ty.View(walk(view, f), walk(pattern, f)),
+            ty.NotNilView(view, pattern) => ty.NotNilView(walk(view, f), walk(pattern, f)),
+
+            _ => tree
+        })
+
+        return copySource(tree, f(tree))
+    }
+
+    ty.Value(walk)
+}
+
+macro __desugar_partial__(call: _) {
+    let (args: _, mkcall: _) = match call {
+        %t({args, ?func, *call}) => do {
+            if func == ty.Nil {
+                (args, match [ty.Arg({arg, *})] => arg)
+            } else {
+                (args, args -> t({*call, func, args}))
+            }
+        }
+    }
+
+    args.map!(e -> __walk!(e, match {
+        ty.Id({name: /^(_+)([xyz])$/, *})
+            => ty.Id({name: $1 + str(' xyz'.search($2))}),
+        e   => e
+    }))
+
+    let depth = 0
+
+    __walk!(call, match {
+        ty.Id({name: /^([$_]_*)\d*$/, *}) as e => do {
+            depth = max(depth, #$1)
+            e
+        },
+
+        e => e
+    })
+
+    // FIXME This doesn't work right now because it breaks on stuff like
+    //          let id = 'foo'
+    //  due to Id(name: 'id') being replaced with Value(<function 'id' at 0x0c482d4724>)
+    //
+    //  We need to distinguish between lvalues, patterns, ordinary exprs, etc.
+    //  while walking the AST.
+    //
+    //  Even if this is fixed, does it make sense to eagerly evaluate here?
+    /*
+    args.map!(ty.Arg({arg, *rest}) -> ty.Arg({
+        arg: __walk!(arg, e -> try { ty.Value(ty.eval(e)) } catch _ { e }),
+        *rest
+    }))
+    */
+
+    args.map!(e -> __walk!(e, match {
+        ty.Id({name: /^_*$/, *})
+            => ty.Id({name: '_'.repeat(depth - #$0 + 1)}),
+        ty.Id({name: /^\$(_*)(\d+)$/, *})
+            => ty.Id({name: '$' + '_'.repeat(depth - #$1 - 1) + $2}),
+        e => e
+    }))
+
+    fn go(args: _, mkcall: _, d: _) -> _ {
+        if d == 0 {
+            return mkcall(args)
+        }
+
+        let _argv = nil
+        let _kwargs = nil
+
+        fn argv()   { ty.Id({name: (_argv   ?? (_argv   = ty.gensym()))}) }
+        fn kwargs() { ty.Id({name: (_kwargs ?? (_kwargs = ty.gensym()))}) }
+
+        let params = []
+
+        let i = 0
+
+        fn param(i) {
+            while #params <= i {
+                params.push(ty.gensym())
+            }
+            ty.Id({name: params[i], module: ''})
+        }
+
+        fn named(name) {
+            if name not in params {
+                params.push(name)
+            }
+            ty.Id({name, module: ''})
+        }
+
+        let reducedArgs = args.map(e -> __walk!(e, match {
+            ty.Id({name: '_', *})           => param(i++),
+            ty.Id({name: /^\$(\d+)$/, *})   => param(int($1) - 1),
+            ty.Id({name: /^\$(_+\d*)$/, *}) => ty.Id({name: "${$1[1;]}"}),
+            ty.Id({name: /^_(_+\d*)$/, *})  => ty.Id({name: $1}),
+            ty.Id({name: '**', *}) as e     => (d == 1) ? kwargs() : ty.Add(kwargs(), e),
+            ty.Id({name: '*',  *}) as e     => (d == 1) ? argv()   : ty.Add(argv(), e),
+            ty.NotNil({name, *})            => named(name),
+            e => e
+        }))
+
+        let params: Array[_Param] = params.map!(id -> ty.Param({name: id}))
+
+        if _argv   != nil { params.push(ty.Gather(_argv)) }
+        if _kwargs != nil { params.push(ty.Kwargs(_kwargs)) }
+
+        ty.Func({params, body: go(reducedArgs, mkcall, d - 1)})
+    }
+
+    go(args, mkcall, max(depth, 1))
+}
+
+fn ??[a, b](x: a | nil, y: b) -> a | b {
+    x ?? y
+}
+
+fn >>[a, b](x: a, f: a -> b) -> b { f(x) }
+fn <<[a, b](f: a -> b, x: a) -> b { f(x) }
+
+fn ?>[a, b](x: a, f: a -> b) -> b;
+fn ?>[a, b](x: nil | a, f: a -> b) -> nil | b;
+
+fn ?>(x: Any, f: Any) { (x == nil) ? nil : f(x) }
+
+macro =~(a, b) = do let [$0, ?$1, ?$2, ?$3, ?$4, ?$5, ?$6, ?$7, ?$8, ?$9] or ($0: String) = $$a.match($$b)
+
+fn .[a, b, c](f: b -> c, g: a -> b) -> (a -> c) {
+    f@(g(*, **))
+}
+
+fn .?[a, b, c](f: b -> c, g: a -> nil | b) -> (a -> nil | c) {
+    (match $x => f(x) else nil) . g
+}
+
+fn <*-[T, ...Args](f: (Args -> T), args: Iterable[_]) -> T {
+    f(*args)
+}
+
+fn sink(file) match file {
+    nil => print@(*, **, :flush)
+
+    fd: Int => {
+        let file = stdio::fdopen(fd, 'a+b')
+        print@(*, **, file=file, :flush)
+    },
+
+    file: String => {
+        let flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC
+
+        let fd = os.open(file, flags, 0644)
+        if fd < 0 {
+            throw Err(fd)
+        }
+
+        let file = stdio.fdopen(fd, 'w+b')
+
+        print@(*, **, file=file, :flush)
+    }
+}
+
+class ScopeGuard {
+    __cleanup: _
+
+    init(cleanup) {
+        __cleanup = cleanup
+    }
+
+    __drop__() {
+        (__cleanup)()
+    }
+}
+
+macro guard(cleanup-func) $$[
+    let ^_ = ScopeGuard($$cleanup-func)
+$$]
+
+macro __d! {
+    let stmt = parse.stmt(99)
+    let result = ty.Id(name: ty.gensym())
+    return $$[
+        do {
+            __debug(1)
+            let $$result = $$stmt
+            __debug(-1)
+            $$result
+        }
+    $$]
+}
+
+macro __debug!(n) {
+    ty.CompileTime($$[ ty.Value(__debug($$n)) $$])
+}
+
+fn memoized[F](fun: F, max: Int = nil) -> F {
+    let def = fun.__def__
+
+    let gather = nil
+    let kwargs = nil
+
+    let params: _ = []
+    let p-vars: _ = []
+
+    for match def.params {
+        ty.Gather(>gather) as p,
+        ty.Kwargs(>kwargs) as p
+            => params.push(p),
+
+        ty.Param({name, *}) => do {
+            params.push(ty.Param({name}))
+            p-vars.push(ty.Id({name}))
+        }
+    }
+
+    if gather { p-vars.push(ty.Spread(ty.Id({name: gather})))      }
+    if kwargs { p-vars.push($$[$$kwargs.items().sort!(by=\_.0)$$]) }
+
+    let call = ty.Call({
+        func: ty.Value(fun),
+        args: [ty.Arg({arg: it}) for p-vars]
+    })
+
+    let key = (#p-vars == 1 && gather == nil && kwargs == nil)
+            ? p-vars[0]
+            : ty.Record([ty.RecordEntry({item: it}) for p-vars])
+
+    let cache = %{}
+    let lock  = SpinLock()
+
+    let guard = ty.gensym()
+
+    let body = match max {
+        nil => $$[
+            let ^$$guard = $${lock}.lock()
+            $${cache}.get-or-put-with(
+                $$key,
+                () -> do {
+                    let ^_ = $$guard.unlocked()
+                    $$call
+                }
+            )
+        $$],
+
+        $max => do {
+            $$[
+                let ^$$guard = $${lock}.lock()
+                let v = $${cache}.get-or-put-with(
+                    $$key,
+                    () -> do {
+                        let ^_ = $$guard.unlocked()
+                        $$call
+                    }
+                )
+                if #$${cache} > $${max} {
+                    $${cache}.pop(0)
+                }
+                v
+            $$]
+        }
+    }
+
+    __eval__(ty.Func({name: fun.__name__, params, body}))
+}
+
+macro assert(condition, message) {
+    let color? = (getenv('NO_COLOR') == nil) && (ty.color != 'never')
+
+    fn pretty-expr(expr) {
+        let {mod, start: {byte: i, *}, end: {byte: j, *}, *} = ty.get-source(expr)
+        color? ? $$[ $$::(parse.highlight)($${mod}, $${i}, $${j}) $$]
+               : ty.String(parse.show(expr))
+    }
+
+    let pretty-cond = pretty-expr(condition)
+
+    let (op, lhs, rhs) = match condition {
+        ty.Eq(a, b)      => (ty.Eq,      a, b),
+        ty.NotEq(a, b)   => (ty.NotEq,   a, b),
+        ty.LT(a, b)      => (ty.LT,      a, b),
+        ty.LEQ(a, b)     => (ty.LEQ,     a, b),
+        ty.GT(a, b)      => (ty.GT,      a, b),
+        ty.GEQ(a, b)     => (ty.GEQ,     a, b),
+        ty.In(a, b)      => (ty.In,      a, b),
+        ty.NotIn(a, b)   => (ty.NotIn,   a, b),
+        ty.Matches(a, b) => (ty.Matches, a, b),
+        _                => (nil, nil, nil)
+    }
+
+    let msg = (message != nil) ? $$[" ({$$message})"$$] : ty.String('')
+
+    if op != nil {
+        let lhs-id = ty.gensym()
+        let rhs-id = ty.gensym()
+
+        let lhs-var = ty.Id(name: lhs-id)
+        let rhs-var = ty.Id(name: rhs-id)
+        let cond    = op(lhs-var, rhs-var)
+
+        let pp? = ty.IfDef(name: 'Printer', module: 'pretty')
+        let show = $$[ $$pp?.map(\__().print(_)).or-else($${::show}) $$]
+
+        let chalk? = ty.IfDef(name: 'chalk', module: 'chalk')
+
+        let pretty-lhs = pretty-expr(lhs)
+        let pretty-rhs = pretty-expr(rhs)
+
+        ty.Block([
+            ty.Let(lhs-var, lhs),
+            ty.Let(rhs-var, rhs),
+            $$[
+                if !$$cond {
+                    let what = match $$chalk? {
+                        Some(chalk) => do {
+                            chalk"[red b]failed assertion[/]: {$$pretty-cond}{$$msg}\n"
+                                 "    [%20]{$$pretty-lhs}[/]: {$$show($$lhs-var)}\n"
+                                 "    [%20]{$$pretty-rhs}[/]: {$$show($$rhs-var)}"
+                        },
+                        None => do {
+                            "assertion failed: {$$pretty-cond}{$$msg}\n"
+                            "    lhs: {$$show($$lhs-var)}\n"
+                            "    rhs: {$$show($$rhs-var)}"
+                        }
+                    }
+                    throw AssertionError("{what}")
+                }
+            $$]
+        ])
+    } else $$[
+        if !$$condition {
+            throw AssertionError("assertion failed: {$$pretty-cond}{$$msg}")
+        }
+    $$]
+}
+
+fn assert2(cond: Any, msg: String = 'assertion failed') -> _ {
+    if !cond {
+        throw AssertionError(msg)
+    }
+}
+
+macro unreachable! = throw AssertionError('unreachable')
+
+class PatchGuard {
+    __mock: _
+    __done: _
+
+    init(mock, done) {
+        __mock = mock
+        __done = done
+    }
+
+    __enter__() {
+        __mock
+    }
+
+    __drop__() {
+        (__done)()
+    }
+}
+
+macro patch(target, val) {
+    let tmp = ty.Id(name: ty.gensym());
+    let obj = ty.Id(name: ty.gensym());
+    let val = (val ?? $$[ Mock() $$])
+
+    let guard = match target {
+        ty.MemberAccess(object, member) => do {
+            let tgt = ty.MemberAccess(obj, member)
+            $$[
+                do {
+                    let $$obj = $$object
+                    let $$tmp = $$tgt
+                    $$tgt = $$val
+                    PatchGuard($$tgt, -> ($$tgt = $$tmp))
+                }
+            $$]
+        },
+
+        ty.Subscript(xs, i) => do {
+            let tgt = ty.Subscript(obj, i)
+            $$[
+                do {
+                    let $$obj = $$xs
+                    let $$tmp = $$tgt
+                    $$tgt = $$val
+                    PatchGuard($$tgt, -> ($$tgt = $$tmp))
+                }
+            $$]
+        },
+
+        ty.Id(_) => ty.Unsafe($$[
+            do {
+                let $$tmp = $$target
+                $$target = $$val
+                PatchGuard($$target, -> ($$target = $$tmp))
+            }
+        $$]),
+
+        _ => throw ValueError("can't patch: {parse.show(target)}")
+    }
+
+    ty.Unsafe(guard)
+}
+
+class Mock {
+    __attrs:   Dict[String, _] = %{*: Mock()}
+    __calls:   Array[_] = []
+
+    return-value: _
+
+    __missing__(name: String) {
+        __attrs[name]
+    }
+
+    __call__(*args: _, %kwargs: _) {
+        __calls.push((args, tuple(**kwargs)))
+        let v = match return-value {
+            (vs: Array) and (#vs > 0)
+                => vs.pop(0),
+            $v  => v,
+            _   => Mock(),
+        }
+        (v :: BaseException) ? (throw v) : v
+    }
+
+    called {
+        #__calls > 0
+    }
+
+    called-once {
+        #__calls == 1
+    }
+
+    called-once-with(*args: _, %kwargs: _) {
+        (#__calls == 1) && (__calls[0] == (args, tuple(**kwargs)))
+    }
+
+    called-with(*args: _, %kwargs: _) {
+        (args, tuple(**kwargs)) in __calls
+    }
+}
+
+operator **   10 right
+operator :>   5  left
+operator !::  3  left
+operator *>   2  left
+operator .    2  left

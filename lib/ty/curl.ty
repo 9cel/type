@@ -1,0 +1,1785 @@
+import ffi as c (C!)
+import time
+import path (Path)
+import json
+
+if not let $libcurl = c.open('curl') {
+    throw RuntimeError('failed to load libcurl')
+}
+
+const CURLcode    = c.int
+const CURLoption  = c.int
+const CURLUPart   = c.int
+const CURLUcode   = c.int
+const CURLMcode   = c.int
+const CURLINFO    = c.int
+const CURLMSG     = c.int
+const curl_off_t  = c.i64
+const CURLversion = c.int
+
+/* ============================================================================
+ * Global initialization flags
+ * ============================================================================ */
+
+pub const CURL_GLOBAL_DEFAULT = 3
+pub const CURL_GLOBAL_SSL     = 1
+pub const CURL_GLOBAL_WIN32   = 2
+pub const CURL_GLOBAL_ALL     = 3
+pub const CURL_GLOBAL_NOTHING = 0
+
+/* ============================================================================
+ * CURLOPT options
+ * ============================================================================ */
+
+pub const CURLOPT_VERBOSE          = 41
+pub const CURLOPT_HEADER           = 42
+pub const CURLOPT_NOPROGRESS       = 43
+pub const CURLOPT_NOSIGNAL         = 99
+pub const CURLOPT_WILDCARDMATCH    = 197
+
+pub const CURLOPT_URL              = 10002
+pub const CURLOPT_PATH_AS_IS       = 234
+pub const CURLOPT_PROTOCOLS_STR    = 10318
+pub const CURLOPT_DEFAULT_PROTOCOL = 10238
+pub const CURLOPT_PROXY            = 10004
+pub const CURLOPT_PROXYPORT        = 59
+pub const CURLOPT_PROXYTYPE        = 101
+pub const CURLOPT_NOPROXY          = 10177
+pub const CURLOPT_HTTPPROXYTUNNEL  = 61
+pub const CURLOPT_INTERFACE        = 10062
+pub const CURLOPT_LOCALPORT        = 139
+pub const CURLOPT_LOCALPORTRANGE   = 140
+pub const CURLOPT_DNS_CACHE_TIMEOUT = 92
+pub const CURLOPT_BUFFERSIZE       = 98
+pub const CURLOPT_PORT             = 3
+pub const CURLOPT_TCP_FASTOPEN     = 244
+pub const CURLOPT_TCP_NODELAY      = 121
+pub const CURLOPT_TCP_KEEPALIVE    = 213
+pub const CURLOPT_TCP_KEEPIDLE     = 214
+pub const CURLOPT_TCP_KEEPINTVL    = 215
+
+pub const CURLOPT_NETRC            = 51
+pub const CURLOPT_NETRC_FILE       = 10118
+pub const CURLOPT_USERPWD          = 10005
+pub const CURLOPT_PROXYUSERPWD     = 10006
+pub const CURLOPT_USERNAME         = 10173
+pub const CURLOPT_PASSWORD         = 10174
+pub const CURLOPT_HTTPAUTH         = 107
+pub const CURLOPT_PROXYAUTH        = 111
+pub const CURLOPT_XOAUTH2_BEARER   = 10220
+
+pub const CURLOPT_AUTOREFERER      = 58
+pub const CURLOPT_ACCEPT_ENCODING  = 10102
+pub const CURLOPT_TRANSFER_ENCODING = 207
+pub const CURLOPT_FOLLOWLOCATION   = 52
+pub const CURLOPT_UNRESTRICTED_AUTH = 105
+pub const CURLOPT_MAXREDIRS        = 68
+pub const CURLOPT_POSTREDIR        = 161
+pub const CURLOPT_PUT              = 54
+pub const CURLOPT_POST             = 47
+pub const CURLOPT_POSTFIELDS       = 10015
+pub const CURLOPT_COPYPOSTFIELDS   = 10165
+pub const CURLOPT_POSTFIELDSIZE    = 60
+pub const CURLOPT_POSTFIELDSIZE_LARGE = 30120
+pub const CURLOPT_REFERER          = 10016
+pub const CURLOPT_USERAGENT        = 10018
+pub const CURLOPT_HTTPHEADER       = 10023
+pub const CURLOPT_COOKIE           = 10022
+pub const CURLOPT_COOKIEFILE       = 10031
+pub const CURLOPT_COOKIEJAR        = 10082
+pub const CURLOPT_COOKIESESSION    = 96
+pub const CURLOPT_COOKIELIST       = 10135
+pub const CURLOPT_HTTPGET          = 80
+pub const CURLOPT_HTTP_VERSION     = 84
+pub const CURLOPT_CUSTOMREQUEST    = 10036
+
+pub const CURLOPT_MIMEPOST         = 10269
+
+pub const CURLOPT_WRITEFUNCTION    = 20011
+pub const CURLOPT_WRITEDATA        = 10001
+pub const CURLOPT_READFUNCTION     = 20012
+pub const CURLOPT_READDATA         = 10009
+pub const CURLOPT_HEADERFUNCTION   = 20079
+pub const CURLOPT_HEADERDATA       = 10029
+pub const CURLOPT_XFERINFOFUNCTION = 20219
+pub const CURLOPT_XFERINFODATA     = 10057
+
+pub const CURLOPT_ERRORBUFFER      = 10010
+pub const CURLOPT_STDERR           = 10037
+pub const CURLOPT_FAILONERROR      = 45
+
+pub const CURLOPT_TIMEOUT          = 13
+pub const CURLOPT_TIMEOUT_MS       = 155
+pub const CURLOPT_LOW_SPEED_LIMIT  = 19
+pub const CURLOPT_LOW_SPEED_TIME   = 20
+pub const CURLOPT_MAXCONNECTS      = 71
+pub const CURLOPT_FRESH_CONNECT    = 74
+pub const CURLOPT_FORBID_REUSE     = 75
+pub const CURLOPT_CONNECTTIMEOUT   = 78
+pub const CURLOPT_CONNECTTIMEOUT_MS = 156
+pub const CURLOPT_IPRESOLVE        = 113
+pub const CURLOPT_CONNECT_ONLY     = 141
+pub const CURLOPT_RESOLVE          = 10203
+
+pub const CURLOPT_SSLCERT          = 10025
+pub const CURLOPT_SSLCERTTYPE      = 10086
+pub const CURLOPT_SSLKEY           = 10087
+pub const CURLOPT_SSLKEYTYPE       = 10088
+pub const CURLOPT_KEYPASSWD        = 10026
+pub const CURLOPT_SSLVERSION       = 32
+pub const CURLOPT_SSL_VERIFYHOST   = 81
+pub const CURLOPT_SSL_VERIFYPEER   = 64
+pub const CURLOPT_CAINFO           = 10065
+pub const CURLOPT_CAPATH           = 10097
+pub const CURLOPT_SSL_CIPHER_LIST  = 10083
+
+pub const CURLOPT_PRIVATE          = 10103
+pub const CURLOPT_NOBODY           = 44
+pub const CURLOPT_UPLOAD           = 46
+
+/* ============================================================================
+ * HTTP authentication types
+ * ============================================================================ */
+
+pub const CURLAUTH_NONE         = 0
+pub const CURLAUTH_BASIC        = (1 << 0)
+pub const CURLAUTH_DIGEST       = (1 << 1)
+pub const CURLAUTH_NEGOTIATE    = (1 << 2)
+pub const CURLAUTH_NTLM         = (1 << 3)
+pub const CURLAUTH_BEARER       = (1 << 6)
+pub const CURLAUTH_ANY          = ~(1 << 4)
+
+/* ============================================================================
+ * HTTP versions
+ * ============================================================================ */
+
+pub const CURL_HTTP_VERSION_NONE = 0
+pub const CURL_HTTP_VERSION_1_0  = 1
+pub const CURL_HTTP_VERSION_1_1  = 2
+pub const CURL_HTTP_VERSION_2_0  = 3
+pub const CURL_HTTP_VERSION_2TLS = 4
+pub const CURL_HTTP_VERSION_3    = 30
+
+/* ============================================================================
+ * IP resolve options
+ * ============================================================================ */
+
+pub const CURL_IPRESOLVE_WHATEVER = 0
+pub const CURL_IPRESOLVE_V4       = 1
+pub const CURL_IPRESOLVE_V6       = 2
+
+/* ============================================================================
+ * Proxy types
+ * ============================================================================ */
+
+pub const CURLPROXY_HTTP            = 0
+pub const CURLPROXY_HTTPS           = 2
+pub const CURLPROXY_SOCKS4          = 4
+pub const CURLPROXY_SOCKS5          = 5
+pub const CURLPROXY_SOCKS5_HOSTNAME = 7
+
+/* ============================================================================
+ * CURLcode error codes
+ * ============================================================================ */
+
+pub const CURLE_OK                       = 0
+pub const CURLE_UNSUPPORTED_PROTOCOL     = 1
+pub const CURLE_FAILED_INIT              = 2
+pub const CURLE_URL_MALFORMAT            = 3
+pub const CURLE_COULDNT_RESOLVE_PROXY    = 5
+pub const CURLE_COULDNT_RESOLVE_HOST     = 6
+pub const CURLE_COULDNT_CONNECT          = 7
+pub const CURLE_HTTP_RETURNED_ERROR      = 22
+pub const CURLE_WRITE_ERROR              = 23
+pub const CURLE_READ_ERROR               = 26
+pub const CURLE_OUT_OF_MEMORY            = 27
+pub const CURLE_OPERATION_TIMEDOUT       = 28
+pub const CURLE_SSL_CONNECT_ERROR        = 35
+pub const CURLE_PEER_FAILED_VERIFICATION = 60
+pub const CURLE_GOT_NOTHING              = 52
+pub const CURLE_SEND_ERROR               = 55
+pub const CURLE_RECV_ERROR               = 56
+pub const CURLE_AGAIN                    = 81
+
+/* ============================================================================
+ * CURLINFO values
+ * ============================================================================ */
+
+pub const CURLINFO_STRING   = 0x100000
+pub const CURLINFO_LONG     = 0x200000
+pub const CURLINFO_DOUBLE   = 0x300000
+pub const CURLINFO_SLIST    = 0x400000
+pub const CURLINFO_OFF_T    = 0x600000
+
+pub const CURLINFO_EFFECTIVE_URL    = CURLINFO_STRING + 1
+pub const CURLINFO_RESPONSE_CODE    = CURLINFO_LONG   + 2
+pub const CURLINFO_TOTAL_TIME       = CURLINFO_DOUBLE + 3
+pub const CURLINFO_REDIRECT_COUNT   = CURLINFO_LONG   + 20
+pub const CURLINFO_CONTENT_TYPE     = CURLINFO_STRING + 18
+
+/* ============================================================================
+ * CURLU (URL API)
+ * ============================================================================ */
+
+pub const CURLUE_OK           = 0
+pub const CURLUE_NO_SCHEME    = 10
+pub const CURLUE_NO_USER      = 11
+pub const CURLUE_NO_PASSWORD  = 12
+pub const CURLUE_NO_OPTIONS   = 13
+pub const CURLUE_NO_HOST      = 14
+pub const CURLUE_NO_PORT      = 15
+pub const CURLUE_NO_QUERY     = 16
+pub const CURLUE_NO_FRAGMENT  = 17
+pub const CURLUE_NO_ZONEID    = 18
+
+pub const CURLUPART_URL      = 0
+pub const CURLUPART_SCHEME   = 1
+pub const CURLUPART_USER     = 2
+pub const CURLUPART_PASSWORD = 3
+pub const CURLUPART_OPTIONS  = 4
+pub const CURLUPART_HOST     = 5
+pub const CURLUPART_PORT     = 6
+pub const CURLUPART_PATH     = 7
+pub const CURLUPART_QUERY    = 8
+pub const CURLUPART_FRAGMENT = 9
+
+pub const CURLU_APPENDQUERY  = (1 << 8)
+pub const CURLU_URLENCODE    = (1 << 7)
+
+/* ============================================================================
+ * Multi interface pub constants
+ * ============================================================================ */
+
+pub const CURLM_OK             = 0
+pub const CURLM_INTERNAL_ERROR = 4
+
+pub const CURLMSG_DONE = 1
+
+/* ============================================================================
+ * C function declarations
+ * ============================================================================ */
+
+C! libcurl fn {
+    CURL *curl_easy_init();
+    CURLcode curl_easy_setopt(CURL *handle, CURLoption option, ...);
+    CURLcode curl_easy_perform(CURL *handle);
+    CURLcode curl_easy_getinfo(CURL *handle, CURLINFO info, ...);
+    void curl_easy_reset(CURL *handle);
+    void curl_easy_cleanup(CURL *handle);
+    char *curl_easy_escape(CURL *handle, const char *string, int length);
+    char *curl_easy_unescape(CURL *handle, const char *string, int length, int *outlength);
+    char const *curl_easy_strerror(CURLcode);
+
+    struct curl_slist *curl_slist_append(struct curl_slist *list, const char *string);
+    void curl_slist_free_all(struct curl_slist *list);
+
+    CURLU *curl_url();
+    CURLU *curl_url_dup(const CURLU *url);
+    CURLUcode curl_url_set(CURLU *handle, CURLUPart what, const char *part, unsigned int flags);
+    CURLUcode curl_url_get(CURLU *handle, CURLUPart what, char **part, unsigned int flags);
+    char const *curl_url_strerror(CURLUcode);
+    void curl_url_cleanup(CURLU *handle);
+
+    curl_mime *curl_mime_init(CURL *easy);
+    void curl_mime_free(curl_mime *mime);
+    curl_mimepart *curl_mime_addpart(curl_mime *mime);
+    CURLcode curl_mime_name(curl_mimepart *part, const char *name);
+    CURLcode curl_mime_filename(curl_mimepart *part, const char *filename);
+    CURLcode curl_mime_type(curl_mimepart *part, const char *mimetype);
+    CURLcode curl_mime_data(curl_mimepart *part, const char *data, size_t datasize);
+    CURLcode curl_mime_filedata(curl_mimepart *part, const char *filename);
+    CURLcode curl_mime_headers(curl_mimepart *part, struct curl_slist *headers, int take_ownership);
+
+    CURLcode curl_global_init(long flags);
+    void curl_global_cleanup();
+
+    char *curl_version();
+    void curl_free(void *p);
+
+    CURLM *curl_multi_init();
+    CURLMcode curl_multi_cleanup(CURLM *multi_handle);
+    CURLMcode curl_multi_add_handle(CURLM *multi_handle, CURL *easy_handle);
+    CURLMcode curl_multi_remove_handle(CURLM *multi_handle, CURL *easy_handle);
+    CURLMcode curl_multi_perform(CURLM *multi_handle, int *running_handles);
+    CURLMcode curl_multi_poll(CURLM *multi_handle, void *extra_fds, unsigned int extra_nfds,
+                              int timeout_ms, int *numfds);
+    CURLMsg *curl_multi_info_read(CURLM *multi_handle, int *msgs_in_queue);
+    char const *curl_multi_strerror(CURLMcode);
+}
+
+C! struct CURLMsg {
+    CURLMSG msg;
+    CURL *easy_handle;
+    union {
+        void *whatever;
+        CURLcode result;
+    };
+}
+
+/* ============================================================================
+ * Error Classes
+ * ============================================================================ */
+
+pub class CURLError < RuntimeError {
+    __code: Int
+    __ctx:  String | nil
+
+    init(code: Int, ctx: ?String) {
+        __code = code
+        __ctx  = ctx
+    }
+
+    code -> Int { __code }
+    context -> String | nil { __ctx }
+
+    what() -> String {
+        if __ctx { "{__ctx}: {strerror(__code)}" } else { strerror(__code) }
+    }
+
+    static strerror(code: Int) -> String {
+        c.as_str(curl_easy_strerror(code))
+    }
+}
+
+pub class CURLUError < CURLError {
+    static strerror(code: Int) -> String {
+        c.as_str(curl_url_strerror(code))
+    }
+}
+
+pub class CURLMError < CURLError {
+    static strerror(code: Int) -> String {
+        c.as_str(curl_multi_strerror(code))
+    }
+}
+
+pub class HTTPError < RuntimeError {
+    __status:  Int
+    __body:    Blob
+    __headers: Dict[String, String | Array[String]]
+
+    init(status: Int, body: Blob, headers: Dict[String, String | Array[String]]) {
+        __status  = status
+        __body    = body
+        __headers = headers
+    }
+
+    status -> Int { __status }
+    body -> Blob { __body }
+    headers -> Dict[String, String | Array[String]] { __headers }
+
+    what() -> String { "HTTP {__status}" }
+}
+
+/* ============================================================================
+ * URL Builder
+ * ============================================================================ */
+
+pub class URL {
+    __handle: Ptr[_]
+
+    init(url: ?String) {
+        __handle = curl_url()
+        if __handle == nil {
+            throw CURLError(CURLE_FAILED_INIT, 'curl_url()')
+        }
+        if url { set(CURLUPART_URL, url) }
+    }
+
+    init(other: URL) {
+        __handle = curl_url_dup(other.__handle)
+        if __handle == nil {
+            throw CURLError(CURLE_FAILED_INIT, 'curl_url_dup()')
+        }
+    }
+
+    __drop__() {
+        if __handle != nil { curl_url_cleanup(__handle) }
+    }
+
+    set(part: Int, value: String, flags: Int = 0) {
+        let res = curl_url_set(__handle, part, value.cstr(), flags)
+        if res != CURLUE_OK { throw CURLUError(res, 'curl_url_set()') }
+        self
+    }
+
+    get(part: Int, flags: Int = 0) -> String | nil {
+        let out = c.auto(c.box(c.ptr))
+        let res = curl_url_get(__handle, part, out, flags)
+        if res == CURLUE_OK {
+            return c.str(out[0])
+        } else if res in [CURLUE_NO_SCHEME, CURLUE_NO_USER, CURLUE_NO_PASSWORD,
+                          CURLUE_NO_OPTIONS, CURLUE_NO_HOST, CURLUE_NO_PORT,
+                          CURLUE_NO_QUERY, CURLUE_NO_FRAGMENT, CURLUE_NO_ZONEID] {
+            return nil
+        }
+        throw CURLUError(res, 'curl_url_get()')
+    }
+
+    scheme(s: ?String)   { if s { set(CURLUPART_SCHEME, s) } else { get(CURLUPART_SCHEME) } }
+    user(u: ?String)     { if u { set(CURLUPART_USER, u) } else { get(CURLUPART_USER) } }
+    password(p: ?String) { if p { set(CURLUPART_PASSWORD, p) } else { get(CURLUPART_PASSWORD) } }
+    host(h: ?String)     { if h { set(CURLUPART_HOST, h) } else { get(CURLUPART_HOST) } }
+    port(p: ?String)     { if p { set(CURLUPART_PORT, p) } else { get(CURLUPART_PORT) } }
+    path(p: ?String)     { if p { set(CURLUPART_PATH, p) } else { get(CURLUPART_PATH) } }
+    query(q: ?String)    { if q { set(CURLUPART_QUERY, q) } else { get(CURLUPART_QUERY) } }
+    fragment(f: ?String) { if f { set(CURLUPART_FRAGMENT, f) } else { get(CURLUPART_FRAGMENT) } }
+
+    append-query(key: String, value: Any) {
+        set(CURLUPART_QUERY, "{key}={value}", CURLU_APPENDQUERY | CURLU_URLENCODE)
+    }
+
+    append-query(params: Dict[String, Any]) {
+        for k, v in params { append-query(k, v) }
+        self
+    }
+
+    str() -> String { get(CURLUPART_URL) ?? '' }
+    __str__() -> String { str() }
+}
+
+/* ============================================================================
+ * Cookie
+ * ============================================================================ */
+
+pub class Cookie {
+    domain:    String
+    path:      String
+    secure:    Bool
+    expires:   Int
+    name:      String
+    value:     String
+    http-only: Bool
+
+    init(
+        name: String,
+        value: String,
+        domain: String = '',
+        path: String = '/',
+        secure: Bool = false,
+        http-only: Bool = false,
+        expires: Int = 0
+    ) {
+        self.name      = name
+        self.value     = value
+        self.domain    = domain
+        self.path      = path
+        self.secure    = secure
+        self.http-only = http-only
+        self.expires   = expires
+    }
+
+    static parse(line: String) -> Cookie | nil {
+        let parts = line.split('\t')
+        if #parts < 7 { return nil }
+        Cookie(
+            name=parts[5],
+            value=parts[6],
+            domain=parts[0],
+            path=parts[2],
+            secure=(parts[3].upper() == 'TRUE'),
+            http-only=parts[0].starts?('#HttpOnly_'),
+            expires=Int(parts[4]) ?? 0
+        )
+    }
+
+    to-netscape() -> String {
+        let domain = if http-only { "#HttpOnly_{self.domain}" } else { self.domain }
+        let include-subdomains = if self.domain.starts?('.') { 'TRUE' } else { 'FALSE' }
+        let secure-str = if secure { 'TRUE' } else { 'FALSE' }
+        "{domain}\t{include-subdomains}\t{path}\t{secure-str}\t{expires}\t{name}\t{value}"
+    }
+
+    to-header() -> String {
+        let parts = ["{name}={value}"]
+        if domain != '' { parts.push("Domain={domain}") }
+        if path != '/' { parts.push("Path={path}") }
+        if secure { parts.push('Secure') }
+        if http-only { parts.push('HttpOnly') }
+        if expires > 0 { parts.push("Expires={expires}") }
+        parts.join('; ')
+    }
+
+    matches(host: String, path: String, secure: Bool) -> Bool {
+        if self.domain.starts?('.') {
+            if !host.ends?(self.domain) && host != self.domain[1;] { return false }
+        } else if self.domain != '' && self.domain != host { return false }
+        if !path.starts?(self.path) { return false }
+        if self.secure && !secure { return false }
+        if self.expires > 0 && self.expires < time.time() { return false }
+        true
+    }
+
+    __str__() -> String { to-header() }
+}
+
+/* ============================================================================
+ * Cookie Jar
+ * ============================================================================ */
+
+pub class CookieJar : Iter[Cookie] {
+    __cookies: Dict[String, Cookie]
+    __file:    String | nil
+
+    init(file: ?String) {
+        __cookies = %{}
+        __file = file
+        if file { load(file) }
+    }
+
+    load(path: String) {
+        if let $content = slurp(path) {
+            for line in content.lines() {
+                if line.starts?('#') && !line.starts?('#HttpOnly_') { continue }
+                if line.strip() == '' { continue }
+                if let $cookie = Cookie.parse(line) {
+                    __cookies["{cookie.domain}:{cookie.path}:{cookie.name}"] = cookie
+                }
+            }
+        }
+    }
+
+    save(path: ?String) {
+        let target = path ?? __file
+        if !target { return }
+        let lines = [
+            '# Netscape HTTP Cookie File',
+            '# https://curl.se/docs/http-cookies.html',
+            ''
+        ]
+        for _, cookie in __cookies { lines.push(cookie.to-netscape()) }
+        Path(target).write(lines.unlines())
+    }
+
+    set(cookie: Cookie) {
+        __cookies["{cookie.domain}:{cookie.path}:{cookie.name}"] = cookie
+    }
+
+    get(domain: String, path: String, name: String) -> Cookie | nil {
+        __cookies["{domain}:{path}:{name}"]
+    }
+
+    delete(domain: String, path: String, name: String) {
+        __cookies.remove("{domain}:{path}:{name}")
+    }
+
+    clear() { __cookies = %{} }
+    all() -> Array[Cookie] { [cookie for _, cookie in __cookies] }
+
+    for-url(url: String) -> Array[Cookie] {
+        let u = URL(url)
+        let host = u.host(nil) ?? ''
+        let path = u.path(nil) ?? '/'
+        let secure = (u.scheme(nil) ?? '').lower() == 'https'
+        [cookie for _, cookie in __cookies if cookie.matches(host, path, secure)]
+    }
+
+    __iter__() { __cookies.values() }
+    __len__() -> Int { #__cookies }
+}
+
+/* ============================================================================
+ * Multipart Form Data
+ * ============================================================================ */
+
+pub class FormPart {
+    name:         String
+    data:         String | Blob | nil
+    filename:     String | nil
+    content-type: String | nil
+    filepath:     String | nil
+    headers:      Dict[String, String]
+
+    init(
+        name: String,
+        data: String | Blob | nil = nil,
+        filename: ?String = nil,
+        content-type: ?String = nil,
+        filepath: ?String = nil,
+        headers: Dict[String, String] = %{}
+    ) {
+        self.name         = name
+        self.data         = data
+        self.filename     = filename
+        self.content-type = content-type
+        self.filepath     = filepath
+        self.headers      = headers
+    }
+
+    static field(name: String, value: Any) -> FormPart {
+        FormPart(name=name, data="{value}")
+    }
+
+    static file(name: String, path: String, filename: ?String, content-type: ?String) -> FormPart {
+        FormPart(name=name, filepath=path, filename=filename ?? Path(path).name, content-type=content-type)
+    }
+
+    static file-data(name: String, data: String | Blob, filename: String, content-type: ?String) -> FormPart {
+        FormPart(name=name, data=data, filename=filename, content-type=content-type)
+    }
+}
+
+pub class FormData : Iter[FormPart] {
+    __parts: Array[FormPart]
+
+    init() { __parts = [] }
+
+    append(part: FormPart) { __parts.push(part); self }
+    append(name: String, value: Any) { __parts.push(FormPart.field(name, value)); self }
+
+    append-file(name: String, path: String, filename: ?String, content-type: ?String) {
+        __parts.push(FormPart.file(name, path, filename, content-type)); self
+    }
+
+    append-file-data(name: String, data: String | Blob, filename: String, content-type: ?String) {
+        __parts.push(FormPart.file-data(name, data, filename, content-type)); self
+    }
+
+    parts() -> Array[FormPart] { __parts }
+    __iter__() { __parts.__iter__() }
+    __len__() -> Int { #__parts }
+}
+
+/* ============================================================================
+ * Progress
+ * ============================================================================ */
+
+pub class Progress {
+    download-total:   Int
+    download-current: Int
+    upload-total:     Int
+    upload-current:   Int
+
+    init(dl-total: Int, dl-now: Int, ul-total: Int, ul-now: Int) {
+        download-total   = dl-total
+        download-current = dl-now
+        upload-total     = ul-total
+        upload-current   = ul-now
+    }
+
+    download-percent() -> Float {
+        if download-total > 0 { (download-current as Float) / (download-total as Float) * 100.0 }
+        else { 0.0 }
+    }
+
+    upload-percent() -> Float {
+        if upload-total > 0 { (upload-current as Float) / (upload-total as Float) * 100.0 }
+        else { 0.0 }
+    }
+}
+
+/* ============================================================================
+ * Response
+ * ============================================================================ */
+
+pub class Response {
+    status:         Int
+    headers:        Dict[String, String | Array[String]]
+    body:           Blob
+    url:            String
+    redirect-count: Int
+    total-time:     Float
+
+    init(
+        status: Int,
+        headers: Dict[String, String | Array[String]],
+        body: Blob,
+        url: String = '',
+        redirect-count: Int = 0,
+        total-time: Float = 0.0
+    ) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+        self.url = url
+        self.redirect-count = redirect-count
+        self.total-time = total-time
+    }
+
+    ok -> Bool { status >= 200 && status < 300 }
+    text() -> String { body.str() }
+    json() -> JSON { json::parse(text()) }
+
+    header(name: String) -> String | nil {
+        let key = name.lower()
+        if let $val = headers[key] {
+            if val :: String { return val } else { return val[0] }
+        }
+        nil
+    }
+
+    header-all(name: String) -> Array[String] {
+        let key = name.lower()
+        if let $val = headers[key] {
+            if val :: String { return [val] } else { return val }
+        }
+        []
+    }
+
+    content-type() -> String | nil { header('content-type') }
+
+    content-length() -> Int | nil {
+        if let $len = header('content-length') { return Int(len) }
+        nil
+    }
+
+    raise-for-status() {
+        if !ok { throw HTTPError(status, body, headers) }
+    }
+}
+
+/* ============================================================================
+ * Request Options
+ * ============================================================================ */
+
+pub class RequestOptions {
+    method:           String
+    url:              String
+    headers:          Dict[String, Any]
+    query:            Dict[String, Any]
+    body:             String | Blob | nil
+    form:             FormData | nil
+    json:             Any | nil
+    timeout:          Int | nil
+    connect-timeout:  Int | nil
+    follow-redirects: Bool
+    max-redirects:    Int
+    auth:             (String, String) | nil
+    auth-method:      Int
+    bearer:           String | nil
+    cookies:          Dict[String, String] | nil
+    cookie-jar:       CookieJar | nil
+    cookie-file:      String | nil
+    cookie-jar-file:  String | nil
+    verify:           Bool
+    verify-host:      Bool
+    ca-cert:          String | nil
+    ca-path:          String | nil
+    client-cert:      String | nil
+    client-key:       String | nil
+    key-password:     String | nil
+    proxy:            String | nil
+    proxy-auth:       (String, String) | nil
+    proxy-type:       Int
+    user-agent:       String | nil
+    referer:          String | nil
+    http-version:     Int
+    verbose:          Bool
+    fail-on-error:    Bool
+    stream:           Bool
+    on-progress:      ((Progress) -> Bool) | nil
+    on-data:          ((Blob) -> Bool) | nil
+
+    init() {
+        method           = 'GET'
+        url              = ''
+        headers          = %{}
+        query            = %{}
+        body             = nil
+        form             = nil
+        json             = nil
+        timeout          = nil
+        connect-timeout  = nil
+        follow-redirects = true
+        max-redirects    = 30
+        auth             = nil
+        auth-method      = CURLAUTH_BASIC
+        bearer           = nil
+        cookies          = nil
+        cookie-jar       = nil
+        cookie-file      = nil
+        cookie-jar-file  = nil
+        verify           = true
+        verify-host      = true
+        ca-cert          = nil
+        ca-path          = nil
+        client-cert      = nil
+        client-key       = nil
+        key-password     = nil
+        proxy            = nil
+        proxy-auth       = nil
+        proxy-type       = CURLPROXY_HTTP
+        user-agent       = nil
+        referer          = nil
+        http-version     = CURL_HTTP_VERSION_NONE
+        verbose          = false
+        fail-on-error    = false
+        stream           = false
+        on-progress      = nil
+        on-data          = nil
+    }
+}
+
+/* ============================================================================
+ * SSE (Server-Sent Events) Support
+ * ============================================================================ */
+
+pub class SSEEvent {
+    event: String | nil
+    data:  String
+    id:    String | nil
+    retry: Int | nil
+
+    init(data: String, event: ?String = nil, id: ?String = nil, retry: ?Int = nil) {
+        self.data  = data
+        self.event = event
+        self.id    = id
+        self.retry = retry
+    }
+
+    json() -> JSON { json::parse(data) }
+
+    __str__() -> String {
+        let parts = []
+        if let $e = event { parts.push("event: {e}") }
+        for line in data.lines() { parts.push("data: {line}") }
+        if let $i = id { parts.push("id: {i}") }
+        if let $r = retry { parts.push("retry: {r}") }
+        parts.join('\n')
+    }
+}
+
+pub class SSEParser {
+    __buffer:  String
+    __event:   String | nil
+    __data:    Array[String]
+    __id:      String | nil
+    __retry:   Int | nil
+    __last-id: String | nil
+
+    init() {
+        __buffer  = ''
+        __event   = nil
+        __data    = []
+        __id      = nil
+        __retry   = nil
+        __last-id = nil
+    }
+
+    last-id -> String | nil { __last-id }
+
+    feed*(chunk: String) {
+        __buffer += chunk
+
+        while let $i = __buffer.search('\n') {
+            let line = __buffer[;i]
+            __buffer = __buffer[i + 1;]
+
+            if line.ends?('\r') { line = line[;-1] }
+
+            if line == '' {
+                if #__data > 0 {
+                    let event = SSEEvent(
+                        data=__data.join('\n'),
+                        event=__event,
+                        id=__id,
+                        retry=__retry
+                    )
+                    if __id { __last-id = __id }
+                    __event = nil
+                    __data = []
+                    __id = nil
+                    __retry = nil
+                    yield event
+                }
+                continue
+            }
+
+            if line.starts?(':') { continue }
+
+            let (field, value) = if let $i = line.search(':') {
+                let f = line[;i]
+                let v = line[i + 1;]
+                if v.starts?(' ') { v = v[1;] }
+                (f, v)
+            } else {
+                (line, '')
+            }
+
+            match field {
+                'event' => { __event = value },
+                'data'  => { __data.push(value) },
+                'id'    => { if '\0' not in value { __id = value } },
+                'retry' => { if let $n = Int(value) { __retry = n } },
+                _       => { }
+            }
+        }
+    }
+
+    flush() -> SSEEvent | nil {
+        if #__data > 0 {
+            let event = SSEEvent(data=__data.join('\n'), event=__event, id=__id, retry=__retry)
+            if __id { __last-id = __id }
+            __event = nil
+            __data = []
+            __id = nil
+            __retry = nil
+            return event
+        }
+        nil
+    }
+
+    reset() {
+        __buffer = ''
+        __event = nil
+        __data = []
+        __id = nil
+        __retry = nil
+    }
+}
+
+/* ============================================================================
+ * Streaming Session (internal, manages curl multi handle)
+ * ============================================================================ */
+
+class StreamingSession {
+    __easy:    Ptr[_] | nil
+    __multi:   Ptr[_] | nil
+    __on-hdr:  Ptr[_]
+    __on-body: Ptr[_]
+    __hdrs:    Dict[String, String | Array[String]]
+    __chunks:  Array[Blob]
+    __mime:    Ptr[_] | nil
+    __done:    Bool
+    __started: Bool
+    __error:   CURLError | nil
+
+    init() {
+        __easy = curl_easy_init()
+        if __easy == nil { throw CURLError(CURLE_FAILED_INIT, 'curl_easy_init()') }
+
+        __multi = curl_multi_init()
+        if __multi == nil {
+            curl_easy_cleanup(__easy)
+            throw CURLMError(CURLM_INTERNAL_ERROR, 'curl_multi_init()')
+        }
+
+        __mime = nil
+        __hdrs = %{}
+        __chunks = []
+        __done = false
+        __started = false
+        __error = nil
+
+        C! closure do-header(ptr: c.ptr, size: c.u64, nmemb: c.u64, user: c.ptr) -> c.u64 {
+            let total = size * nmemb
+            let line = c.as_str(ptr, total).strip()
+            if let $i = line.search(':') {
+                let (key, val) = line.split(i)
+                let key = key.strip().lower()
+                let val = val[1;].strip()
+                if let $hdr = __hdrs[key] {
+                    if hdr :: String { __hdrs[key] = [hdr, val] }
+                    else { hdr.push(val) }
+                } else {
+                    __hdrs[key] = val
+                }
+            }
+            total
+        }
+
+        C! closure do-write(ptr: c.ptr, size: c.u64, nmemb: c.u64, user: c.ptr) -> c.u64 {
+            let total = size * nmemb
+            __chunks.push(Blob(c.as_str(ptr, total)))
+            total
+        }
+
+        __on-hdr = do-header
+        __on-body = do-write
+
+        let res = curl_easy_setopt(__easy, CURLOPT_HEADERFUNCTION, (c.ptr, __on-hdr))
+        if res != CURLE_OK { __cleanup(); throw CURLError(res, 'CURLOPT_HEADERFUNCTION') }
+
+        res = curl_easy_setopt(__easy, CURLOPT_WRITEFUNCTION, (c.ptr, __on-body))
+        if res != CURLE_OK { __cleanup(); throw CURLError(res, 'CURLOPT_WRITEFUNCTION') }
+    }
+
+    __cleanup() {
+        if __mime != nil { curl_mime_free(__mime); __mime = nil }
+        if __easy != nil && __multi != nil { curl_multi_remove_handle(__multi, __easy) }
+        if __easy != nil { curl_easy_cleanup(__easy); __easy = nil }
+        if __multi != nil { curl_multi_cleanup(__multi); __multi = nil }
+    }
+
+    __drop__() { __cleanup() }
+
+    __setopt[T](opt: Int, val: (CType[T], IntoPtr[T]), ctx: String) {
+        let res = curl_easy_setopt(__easy, opt, val)
+        if res != CURLE_OK { throw CURLError(res, ctx) }
+    }
+
+    setopt-str(opt: Int, val: String, ctx: String) { __setopt(opt, (c.ptr, val.cstr()), ctx) }
+    setopt-long(opt: Int, val: Int, ctx: String) { __setopt(opt, (c.long, val), ctx) }
+    setopt-ptr(opt: Int, val: IntoPtr[_] | nil, ctx: String) { __setopt(opt, (c.ptr, val), ctx) }
+
+    __getinfo-long(info: Int) -> Int {
+        let out = c.auto(c.box(c.long))
+        let res = curl_easy_getinfo(__easy, info, (c.ptr, out))
+        if res != CURLE_OK { throw CURLError(res, 'curl_easy_getinfo()') }
+        out[0]
+    }
+
+    __getinfo-str(info: Int) -> String | nil {
+        let out = c.auto(c.box(c.ptr))
+        let res = curl_easy_getinfo(__easy, info, (c.ptr, out))
+        if res != CURLE_OK { throw CURLError(res, 'curl_easy_getinfo()') }
+        if out[0] == nil { return nil }
+        c.as_str(out[0])
+    }
+
+    setup-mime(form: FormData) {
+        if __mime != nil { curl_mime_free(__mime) }
+        __mime = curl_mime_init(__easy)
+        if __mime == nil { throw CURLError(CURLE_FAILED_INIT, 'curl_mime_init()') }
+
+        for part in form {
+            let mpart = curl_mime_addpart(__mime)
+            if mpart == nil { throw CURLError(CURLE_FAILED_INIT, 'curl_mime_addpart()') }
+
+            let res = curl_mime_name(mpart, part.name.cstr())
+            if res != CURLE_OK { throw CURLError(res, 'curl_mime_name()') }
+
+            if let $filepath = part.filepath {
+                res = curl_mime_filedata(mpart, filepath.cstr())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_filedata()') }
+            } else if let $data = part.data {
+                let bytes = if data :: String { data } else { data.str() }
+                res = curl_mime_data(mpart, bytes.cstr(), bytes.size())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_data()') }
+            }
+
+            if let $filename = part.filename {
+                res = curl_mime_filename(mpart, filename.cstr())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_filename()') }
+            }
+
+            if let $ct = part.content-type {
+                res = curl_mime_type(mpart, ct.cstr())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_type()') }
+            }
+
+            if #part.headers > 0 {
+                let hdrs = nil
+                for k, v in part.headers { hdrs = curl_slist_append(hdrs, "{k}: {v}".cstr()) }
+                res = curl_mime_headers(mpart, hdrs, 1)
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_headers()') }
+            }
+        }
+
+        setopt-ptr(CURLOPT_MIMEPOST, __mime, 'CURLOPT_MIMEPOST')
+    }
+
+    setup-headers(headers: Dict[String, Any]) {
+        if #headers == 0 {
+            return
+        }
+
+        let list = nil
+
+        for k, v in headers {
+            list = curl_slist_append(list, "{k}: {v}".cstr())
+        }
+
+        setopt-ptr(CURLOPT_HTTPHEADER, list, 'CURLOPT_HTTPHEADER')
+    }
+
+    start() {
+        if __started { return }
+        __started = true
+        let res = curl_multi_add_handle(__multi, __easy)
+        if res != CURLM_OK { throw CURLMError(res, 'curl_multi_add_handle()') }
+    }
+
+    poll(timeout-ms: Int = 100) -> Bool {
+        if __done { return false }
+
+        let running = c.auto(c.box(c.int))
+        let res = curl_multi_perform(__multi, running)
+        if res != CURLM_OK {
+            __error = CURLMError(res, 'curl_multi_perform()')
+            __done = true
+            return false
+        }
+
+        if running[0] == 0 {
+            let msgs = c.auto(c.box(c.int))
+            while let $msg = curl_multi_info_read(__multi, msgs) {
+                let msg = CURLMsg(msg)
+                if msg.msg == CURLMSG_DONE {
+                    let result = msg.result
+                    if result != CURLE_OK {
+                        __error = CURLError(result, 'curl_easy_perform()')
+                    }
+                }
+            }
+            __done = true
+            return false
+        }
+
+        let numfds = c.auto(c.box(c.int))
+        res = curl_multi_poll(__multi, nil, 0, timeout-ms, numfds)
+        if res != CURLM_OK {
+            __error = CURLMError(res, 'curl_multi_poll()')
+            __done = true
+            return false
+        }
+
+        true
+    }
+
+    chunks*() {
+        start()
+
+        while true {
+            while #__chunks > 0 { yield __chunks.pop(0) }
+            if !poll() { break }
+        }
+
+        while #__chunks > 0 { yield __chunks.pop(0) }
+
+        if let $err = __error { throw err }
+    }
+
+    close() { __done = true; __cleanup() }
+
+    headers -> Dict[String, String | Array[String]] { __hdrs }
+    status -> Int { __getinfo-long(CURLINFO_RESPONSE_CODE) }
+    effective-url -> String { __getinfo-str(CURLINFO_EFFECTIVE_URL) ?? '' }
+}
+
+/* ============================================================================
+ * Streaming Response
+ * ============================================================================ */
+
+pub class StreamResponse {
+    status:  Int
+    headers: Dict[String, String | Array[String]]
+    url:     String
+
+    __stream: StreamingSession
+
+    init(status: Int, headers: Dict[String, String | Array[String]], url: String, stream: StreamingSession) {
+        self.status  = status
+        self.headers = headers
+        self.url     = url
+        __stream     = stream
+    }
+
+    ok -> Bool { status >= 200 && status < 300 }
+
+    header(name: String) -> String | nil {
+        let key = name.lower()
+        if let $val = headers[key] {
+            if val :: String { return val } else { return val[0] }
+        }
+        nil
+    }
+
+    header-all(name: String) -> Array[String] {
+        let key = name.lower()
+        if let $val = headers[key] {
+            if val :: String { return [val] } else { return val }
+        }
+        []
+    }
+
+    content-type() -> String | nil { header('content-type') }
+
+    raise-for-status() {
+        if !ok { throw HTTPError(status, Blob(), headers) }
+    }
+
+    chunks() -> Generator[Blob] {
+        __stream.chunks()
+    }
+
+    lines*() {
+        let buffer = ''
+        for chunk in chunks() {
+            buffer += chunk.str()
+            while let $i = buffer.search('\n') {
+                let line = buffer[;i]
+                buffer = buffer[i + 1;]
+                if line.ends?('\r') { line = line[;-1] }
+                yield line
+            }
+        }
+        if buffer != '' { yield buffer }
+    }
+
+    events*() {
+        let parser = SSEParser()
+        for chunk in chunks() {
+            for event in parser.feed(chunk.str()) {
+                yield event
+            }
+        }
+        if let $event = parser.flush() {
+            yield event
+        }
+    }
+
+    read() -> Blob {
+        let result = Blob()
+        for chunk in chunks() { result.push(chunk) }
+        result
+    }
+
+    text() -> String { read().str() }
+    json() -> JSON { json::parse(text()) }
+    close() { __stream.close() }
+}
+
+/* ============================================================================
+ * CURL Session
+ * ============================================================================ */
+
+pub class Session {
+    __handle:      Ptr[_]
+    __on-hdr:      Ptr[_]
+    __on-body:     Ptr[_]
+    __on-progress: Ptr[_]
+    __hdrs:        Dict[String, String | Array[String]]
+    __resp:        Blob
+    __mime:        Ptr[_] | nil
+    __slist:       Ptr[_] | nil
+    __progress-cb: ((Progress) -> Bool) | nil
+    __data-cb:     ((Blob) -> Bool) | nil
+    __abort:       Bool
+
+    defaults: RequestOptions
+
+    init() {
+        __handle = curl_easy_init()
+        if __handle == nil { throw CURLError(CURLE_FAILED_INIT, 'curl_easy_init()') }
+
+        defaults = RequestOptions()
+        __mime = nil
+        __slist = nil
+        __progress-cb = nil
+        __data-cb = nil
+        __abort = false
+
+        C! closure do-write(ptr: c.ptr, size: c.u64, nmemb: c.u64, user: c.ptr) -> c.u64 {
+            let total = size * nmemb
+            let chunk = Blob(c.as_str(ptr, total))
+            if let $cb = __data-cb {
+                if !cb(chunk) { __abort = true; return 0 }
+            }
+            __resp.push(chunk)
+            total
+        }
+
+        C! closure do-header(ptr: c.ptr, size: c.u64, nmemb: c.u64, user: c.ptr) -> c.u64 {
+            let total = size * nmemb
+            let line = c.as_str(ptr, total).strip()
+            if let $i = line.search(':') {
+                let (key, val) = line.split(i)
+                let key = key.strip().lower()
+                let val = val[1;].strip()
+                if let $hdr = __hdrs[key] {
+                    if hdr :: String { __hdrs[key] = [hdr, val] }
+                    else { hdr.push(val) }
+                } else {
+                    __hdrs[key] = val
+                }
+            }
+            total
+        }
+
+        C! closure do-progress(clientp: c.ptr, dltotal: c.i64, dlnow: c.i64, ultotal: c.i64, ulnow: c.i64) -> c.int {
+            if let $cb = __progress-cb {
+                let progress = Progress(dltotal, dlnow, ultotal, ulnow)
+                if cb(progress) { 0 } else { 1 }
+            } else { 0 }
+        }
+
+        __on-body = do-write
+        __on-hdr = do-header
+        __on-progress = do-progress
+
+        __reset()
+    }
+
+    __drop__() {
+        __cleanup-mime()
+        __cleanup-slist()
+        if __handle != nil { curl_easy_cleanup(__handle) }
+    }
+
+    __cleanup-mime() { if __mime != nil { curl_mime_free(__mime); __mime = nil } }
+    __cleanup-slist() { if __slist != nil { curl_slist_free_all(__slist); __slist = nil } }
+
+    __reset() {
+        curl_easy_reset(__handle)
+        __cleanup-mime()
+        __cleanup-slist()
+
+        let res = curl_easy_setopt(__handle, CURLOPT_WRITEFUNCTION, (c.ptr, __on-body))
+        if res != CURLE_OK { throw CURLError(res, 'CURLOPT_WRITEFUNCTION') }
+
+        res = curl_easy_setopt(__handle, CURLOPT_HEADERFUNCTION, (c.ptr, __on-hdr))
+        if res != CURLE_OK { throw CURLError(res, 'CURLOPT_HEADERFUNCTION') }
+
+        __hdrs = %{}
+        __resp = Blob()
+        __progress-cb = nil
+        __data-cb = nil
+        __abort = false
+    }
+
+    __setopt[T](opt: Int, val: (CType[T], IntoPtr[T]), ctx: String) {
+        let res = curl_easy_setopt(__handle, opt, val)
+        if res != CURLE_OK { throw CURLError(res, ctx) }
+    }
+
+    setopt-str(opt: Int, val: String, ctx: String) { __setopt(opt, (c.ptr, val.cstr()), ctx) }
+    setopt-long(opt: Int, val: Int, ctx: String) { __setopt(opt, (c.long, val), ctx) }
+    setopt-ptr(opt: Int, val: IntoPtr[_] | nil, ctx: String) { __setopt(opt, (c.ptr, val), ctx) }
+
+    __getinfo-long(info: Int) -> Int {
+        let out = c.auto(c.box(c.long))
+        let res = curl_easy_getinfo(__handle, info, (c.ptr, out))
+        if res != CURLE_OK { throw CURLError(res, 'curl_easy_getinfo()') }
+        out[0]
+    }
+
+    __getinfo-double(info: Int) -> Float {
+        let out = c.auto(c.box(c.double))
+        let res = curl_easy_getinfo(__handle, info, (c.ptr, out))
+        if res != CURLE_OK { throw CURLError(res, 'curl_easy_getinfo()') }
+        out[0]
+    }
+
+    __getinfo-str(info: Int) -> String | nil {
+        let out = c.auto(c.box(c.ptr))
+        let res = curl_easy_getinfo(__handle, info, (c.ptr, out))
+        if res != CURLE_OK { throw CURLError(res, 'curl_easy_getinfo()') }
+        if out[0] == nil { return nil }
+        c.as_str(out[0])
+    }
+
+    __build-url(base: String, query: Dict[String, Any]) -> String {
+        if #query == 0 { return base }
+        let u = URL(base)
+        u.append-query(query)
+        u.str()
+    }
+
+    __setup-mime(form: FormData) {
+        __cleanup-mime()
+        __mime = curl_mime_init(__handle)
+        if __mime == nil { throw CURLError(CURLE_FAILED_INIT, 'curl_mime_init()') }
+
+        for part in form {
+            let mpart = curl_mime_addpart(__mime)
+            if mpart == nil { throw CURLError(CURLE_FAILED_INIT, 'curl_mime_addpart()') }
+
+            let res = curl_mime_name(mpart, part.name.cstr())
+            if res != CURLE_OK { throw CURLError(res, 'curl_mime_name()') }
+
+            if let $filepath = part.filepath {
+                res = curl_mime_filedata(mpart, filepath.cstr())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_filedata()') }
+            } else if let $data = part.data {
+                let bytes = if data :: String { data } else { data.str() }
+                res = curl_mime_data(mpart, bytes.cstr(), bytes.size())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_data()') }
+            }
+
+            if let $filename = part.filename {
+                res = curl_mime_filename(mpart, filename.cstr())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_filename()') }
+            }
+
+            if let $ct = part.content-type {
+                res = curl_mime_type(mpart, ct.cstr())
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_type()') }
+            }
+
+            if #part.headers > 0 {
+                let hdrs = nil
+                for k, v in part.headers { hdrs = curl_slist_append(hdrs, "{k}: {v}".cstr()) }
+                res = curl_mime_headers(mpart, hdrs, 1)
+                if res != CURLE_OK { throw CURLError(res, 'curl_mime_headers()') }
+            }
+        }
+
+        setopt-ptr(CURLOPT_MIMEPOST, __mime, 'CURLOPT_MIMEPOST')
+    }
+
+    __setup-headers(headers: Dict[String, Any]) {
+        __cleanup-slist()
+        if #headers == 0 { return }
+        for k, v in headers { __slist = curl_slist_append(__slist, "{k}: {v}".cstr()) }
+        setopt-ptr(CURLOPT_HTTPHEADER, __slist, 'CURLOPT_HTTPHEADER')
+    }
+
+    __configure(opts: RequestOptions, target: StreamingSession | nil = nil) -> String {
+        let method = opts.method
+        let url = __build-url(opts.url, opts.query)
+        let headers = %{**defaults.headers, **opts.headers}
+        let timeout = opts.timeout ?? defaults.timeout
+        let connect-timeout = opts.connect-timeout ?? defaults.connect-timeout
+        let follow-redirects = opts.follow-redirects
+        let max-redirects = opts.max-redirects
+        let auth = opts.auth ?? defaults.auth
+        let auth-method = opts.auth ? opts.auth-method : defaults.auth-method
+        let bearer = opts.bearer ?? defaults.bearer
+        let verify = opts.verify
+        let verify-host = opts.verify-host
+        let proxy = opts.proxy ?? defaults.proxy
+        let proxy-auth = opts.proxy-auth ?? defaults.proxy-auth
+        let proxy-type = opts.proxy ? opts.proxy-type : defaults.proxy-type
+        let user-agent = opts.user-agent ?? defaults.user-agent
+        let referer = opts.referer ?? defaults.referer
+        let verbose = opts.verbose || defaults.verbose
+
+        let t = target ?? self
+
+        t.setopt-str(CURLOPT_URL, url, 'CURLOPT_URL')
+
+        match method.upper() {
+            'GET'  => { t.setopt-long(CURLOPT_HTTPGET, 1, 'CURLOPT_HTTPGET') },
+            'HEAD' => { t.setopt-long(CURLOPT_NOBODY, 1, 'CURLOPT_NOBODY') },
+            'POST' => { t.setopt-long(CURLOPT_POST, 1, 'CURLOPT_POST') },
+            _      => { t.setopt-str(CURLOPT_CUSTOMREQUEST, method.upper(), 'CURLOPT_CUSTOMREQUEST') }
+        }
+
+        if let $form = opts.form {
+            if target { target.setup-mime(form) } else { __setup-mime(form) }
+        } else if let $j = opts.json {
+            let body = json::encode(j)
+            if 'content-type' not in headers { headers['Content-Type'] = 'application/json' }
+            t.setopt-long(CURLOPT_POSTFIELDSIZE, body.size(), 'CURLOPT_POSTFIELDSIZE')
+            t.setopt-str(CURLOPT_COPYPOSTFIELDS, body, 'CURLOPT_COPYPOSTFIELDS')
+        } else if let $body = opts.body {
+            let data = if body :: String { body } else { body.str() }
+            t.setopt-long(CURLOPT_POSTFIELDSIZE, data.size(), 'CURLOPT_POSTFIELDSIZE')
+            t.setopt-str(CURLOPT_COPYPOSTFIELDS, data, 'CURLOPT_COPYPOSTFIELDS')
+        }
+
+        if target { target.setup-headers(headers) } else { __setup-headers(headers) }
+
+        if let $tm = timeout { t.setopt-long(CURLOPT_TIMEOUT, tm, 'CURLOPT_TIMEOUT') }
+        if let $tm = connect-timeout { t.setopt-long(CURLOPT_CONNECTTIMEOUT, tm, 'CURLOPT_CONNECTTIMEOUT') }
+
+        t.setopt-long(CURLOPT_FOLLOWLOCATION, if follow-redirects { 1 } else { 0 }, 'CURLOPT_FOLLOWLOCATION')
+        t.setopt-long(CURLOPT_MAXREDIRS, max-redirects, 'CURLOPT_MAXREDIRS')
+
+        if let (user, pass) = auth {
+            t.setopt-str(CURLOPT_USERPWD, "{user}:{pass}", 'CURLOPT_USERPWD')
+            t.setopt-long(CURLOPT_HTTPAUTH, auth-method, 'CURLOPT_HTTPAUTH')
+        }
+        if let $token = bearer {
+            t.setopt-str(CURLOPT_XOAUTH2_BEARER, token, 'CURLOPT_XOAUTH2_BEARER')
+            t.setopt-long(CURLOPT_HTTPAUTH, CURLAUTH_BEARER, 'CURLOPT_HTTPAUTH')
+        }
+
+        if let $cookies = opts.cookies {
+            let cookie-str = ["{k}={v}" for k, v in cookies].join('; ')
+            t.setopt-str(CURLOPT_COOKIE, cookie-str, 'CURLOPT_COOKIE')
+        }
+        if let $jar = opts.cookie-jar ?? defaults.cookie-jar {
+            let cookie-str = ["{c.name}={c.value}" for c in jar].join('; ')
+            if cookie-str != '' { t.setopt-str(CURLOPT_COOKIE, cookie-str, 'CURLOPT_COOKIE') }
+        }
+        if let $file = opts.cookie-file ?? defaults.cookie-file {
+            t.setopt-str(CURLOPT_COOKIEFILE, file, 'CURLOPT_COOKIEFILE')
+        }
+        if let $file = opts.cookie-jar-file ?? defaults.cookie-jar-file {
+            t.setopt-str(CURLOPT_COOKIEJAR, file, 'CURLOPT_COOKIEJAR')
+        }
+
+        t.setopt-long(CURLOPT_SSL_VERIFYPEER, verify ? 1 : 0, 'CURLOPT_SSL_VERIFYPEER')
+        t.setopt-long(CURLOPT_SSL_VERIFYHOST, verify-host ? 2 : 0, 'CURLOPT_SSL_VERIFYHOST')
+
+        if let $ca = opts.ca-cert ?? defaults.ca-cert { t.setopt-str(CURLOPT_CAINFO, ca, 'CURLOPT_CAINFO') }
+        if let $ca = opts.ca-path ?? defaults.ca-path { t.setopt-str(CURLOPT_CAPATH, ca, 'CURLOPT_CAPATH') }
+        if let $cert = opts.client-cert ?? defaults.client-cert { t.setopt-str(CURLOPT_SSLCERT, cert, 'CURLOPT_SSLCERT') }
+        if let $key = opts.client-key ?? defaults.client-key { t.setopt-str(CURLOPT_SSLKEY, key, 'CURLOPT_SSLKEY') }
+        if let $pass = opts.key-password ?? defaults.key-password { t.setopt-str(CURLOPT_KEYPASSWD, pass, 'CURLOPT_KEYPASSWD') }
+
+        if let $p = proxy {
+            t.setopt-str(CURLOPT_PROXY, p, 'CURLOPT_PROXY')
+            t.setopt-long(CURLOPT_PROXYTYPE, proxy-type, 'CURLOPT_PROXYTYPE')
+        }
+        if let (user, pass) = proxy-auth { t.setopt-str(CURLOPT_PROXYUSERPWD, "{user}:{pass}", 'CURLOPT_PROXYUSERPWD') }
+
+        if let $ua = user-agent { t.setopt-str(CURLOPT_USERAGENT, ua, 'CURLOPT_USERAGENT') }
+        if let $ref = referer { t.setopt-str(CURLOPT_REFERER, ref, 'CURLOPT_REFERER') }
+
+        if opts.http-version != CURL_HTTP_VERSION_NONE {
+            t.setopt-long(CURLOPT_HTTP_VERSION, opts.http-version, 'CURLOPT_HTTP_VERSION')
+        }
+
+        if verbose { t.setopt-long(CURLOPT_VERBOSE, 1, 'CURLOPT_VERBOSE') }
+
+        url
+    }
+
+    request(opts: RequestOptions) -> Response {
+        __reset()
+
+        let url = __configure(opts)
+        let fail-on-error = opts.fail-on-error || defaults.fail-on-error
+        let on-progress = opts.on-progress ?? defaults.on-progress
+        let on-data = opts.on-data ?? defaults.on-data
+
+        __data-cb = on-data
+
+        if let $cb = on-progress {
+            __progress-cb = cb
+            setopt-long(CURLOPT_NOPROGRESS, 0, 'CURLOPT_NOPROGRESS')
+            setopt-ptr(CURLOPT_XFERINFOFUNCTION, __on-progress, 'CURLOPT_XFERINFOFUNCTION')
+        }
+
+        let res = curl_easy_perform(__handle)
+        if res != CURLE_OK && !__abort { throw CURLError(res, 'curl_easy_perform()') }
+
+        let status = __getinfo-long(CURLINFO_RESPONSE_CODE)
+        let effective-url = __getinfo-str(CURLINFO_EFFECTIVE_URL) ?? url
+        let redirect-count = __getinfo-long(CURLINFO_REDIRECT_COUNT)
+        let total-time = __getinfo-double(CURLINFO_TOTAL_TIME)
+
+        let response = Response(
+            status=status,
+            headers=__hdrs,
+            body=__resp,
+            url=effective-url,
+            redirect-count=redirect-count,
+            total-time=total-time
+        )
+
+        if fail-on-error && !response.ok { throw HTTPError(status, __resp, __hdrs) }
+
+        response
+    }
+
+    request-stream(opts: RequestOptions) -> StreamResponse {
+        let stream = StreamingSession()
+        __configure(opts, stream)
+        stream.start()
+
+        while #stream.headers == 0 && stream.poll(10) { }
+
+        StreamResponse(
+            status=stream.status,
+            headers=stream.headers,
+            url=stream.effective-url,
+            stream=stream
+        )
+    }
+
+    get(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'GET'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    post(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'POST'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    put(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'PUT'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    patch(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'PATCH'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    delete(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'DELETE'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    head(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'HEAD'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    options(url: String, %kwargs) -> Response {
+        let opts = RequestOptions()
+        opts.method = 'OPTIONS'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request(opts)
+    }
+
+    get-stream(url: String, %kwargs) -> StreamResponse {
+        let opts = RequestOptions()
+        opts.method = 'GET'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request-stream(opts)
+    }
+
+    post-stream(url: String, %kwargs) -> StreamResponse {
+        let opts = RequestOptions()
+        opts.method = 'POST'
+        opts.url = url
+        __apply-kwargs(opts, kwargs)
+        request-stream(opts)
+    }
+
+    __apply-kwargs(opts: RequestOptions, kwargs: Dict[String, Any]) {
+        for key, val in kwargs { opts.{key} = val }
+    }
+
+    escape(s: String) -> String {
+        let result = curl_easy_escape(__handle, s.cstr(), s.size())
+        if result == nil { throw CURLError(CURLE_OUT_OF_MEMORY, 'curl_easy_escape()') }
+        let str = c.as_str(result)
+        curl_free(result)
+        str
+    }
+
+    unescape(s: String) -> String {
+        let out-len = c.auto(c.box(c.int))
+        let result = curl_easy_unescape(__handle, s.cstr(), s.size(), out-len)
+        if result == nil { throw CURLError(CURLE_OUT_OF_MEMORY, 'curl_easy_unescape()') }
+        let str = c.as_str(result, out-len[0])
+        curl_free(result)
+        str
+    }
+}
+
+/* ============================================================================
+ * Module-level convenience functions
+ * ============================================================================ */
+
+let __tls::session = nil
+
+fn __get-session() -> Session {
+    session ?? (session = Session())
+}
+
+pub fn fetch(
+    url: String,
+    method: String = 'GET',
+    headers: Dict[String, Any] = %{},
+    query: Dict[String, Any] = %{},
+    body: String | Blob | nil = nil,
+    form: FormData | nil = nil,
+    json: Any | nil = nil,
+    timeout: Int | nil = nil,
+    connect-timeout: Int | nil = nil,
+    follow-redirects: Bool = true,
+    max-redirects: Int = 30,
+    auth: (String, String) | nil = nil,
+    bearer: String | nil = nil,
+    cookies: Dict[String, String] | nil = nil,
+    verify: Bool = true,
+    proxy: String | nil = nil,
+    user-agent: String | nil = nil,
+    verbose: Bool = false,
+    fail-on-error: Bool = false,
+    on-progress: ((Progress) -> Bool) | nil = nil,
+    on-data: ((Blob) -> Bool) | nil = nil
+) -> Response {
+    let opts = RequestOptions()
+    opts.method = method
+    opts.url = url
+    opts.headers = headers
+    opts.query = query
+    opts.body = body
+    opts.form = form
+    opts.json = json
+    opts.timeout = timeout
+    opts.connect-timeout = connect-timeout
+    opts.follow-redirects = follow-redirects
+    opts.max-redirects = max-redirects
+    opts.auth = auth
+    opts.bearer = bearer
+    opts.cookies = cookies
+    opts.verify = verify
+    opts.proxy = proxy
+    opts.user-agent = user-agent
+    opts.verbose = verbose
+    opts.fail-on-error = fail-on-error
+    opts.on-progress = on-progress
+    opts.on-data = on-data
+
+    __get-session().request(opts)
+}
+
+pub fn get(url: String, %kwargs) -> Response { __get-session().get(url, **kwargs) }
+pub fn post(url: String, %kwargs) -> Response { __get-session().post(url, **kwargs) }
+pub fn put(url: String, %kwargs) -> Response { __get-session().put(url, **kwargs) }
+pub fn patch(url: String, %kwargs) -> Response { __get-session().patch(url, **kwargs) }
+pub fn delete(url: String, %kwargs) -> Response { __get-session().delete(url, **kwargs) }
+pub fn head(url: String, %kwargs) -> Response { __get-session().head(url, **kwargs) }
+pub fn options(url: String, %kwargs) -> Response { __get-session().options(url, **kwargs) }
+
+pub fn get-stream(url: String, %kwargs) -> StreamResponse { __get-session().get-stream(url, **kwargs) }
+pub fn post-stream(url: String, %kwargs) -> StreamResponse { __get-session().post-stream(url, **kwargs) }
+
+/* SSE convenience generator */
+pub fn sse(
+    url: String,
+    method: String = 'GET',
+    headers: Dict[String, Any] = %{},
+    query: Dict[String, Any] = %{},
+    body: String | Blob | nil = nil,
+    json: Any | nil = nil,
+    auth: (String, String) | nil = nil,
+    bearer: String | nil = nil,
+    last-event-id: String | nil = nil,
+    verify: Bool = true,
+    verbose: Bool = false
+) {
+    let h = %{**headers}
+
+    if 'Accept' not in h && 'accept' not in h { h['Accept'] = 'text/event-stream' }
+    if 'Cache-Control' not in h && 'cache-control' not in h { h['Cache-Control'] = 'no-cache' }
+    if let $id = last-event-id { h['Last-Event-ID'] = id }
+
+    let opts = RequestOptions()
+    opts.method = method
+    opts.url = url
+    opts.headers = h
+    opts.query = query
+    opts.body = body
+    opts.json = json
+    opts.auth = auth
+    opts.bearer = bearer
+    opts.verify = verify
+    opts.verbose = verbose
+    opts.timeout = nil
+
+    let stream = __get-session().request-stream(opts)
+    stream.raise-for-status()
+
+    stream.events()
+}
+
+pub fn urlencode(s: String) -> String { __get-session().escape(s) }
+pub fn urldecode(s: String) -> String { __get-session().unescape(s) }
+pub fn version() -> String { c.as_str(curl_version()) }
+
+/* ============================================================================
+ * Initialize libcurl globally
+ * ============================================================================ */
+
+curl_global_init(CURL_GLOBAL_DEFAULT)

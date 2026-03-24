@@ -1,0 +1,660 @@
+import xml
+import path (Path)
+
+fn is-name-char(ch: String) -> Bool {
+    ch.match?(/^[A-Za-z0-9_:-]$/)
+}
+
+fn is-space(ch: String) -> Bool {
+    ch.match?(/^\s$/)
+}
+
+fn xpath-literal(s: String) -> String {
+    if !s.match?(/'/) {
+        return "'{s}'"
+    }
+
+    if !s.match?(/\"/) {
+        return "\"{s}\""
+    }
+
+    let parts = s.split("'")
+    let out = ""
+
+    for i in ..#parts {
+        if i > 0 {
+            out = "{out},\"'\","
+        }
+        out = "{out}'{parts[i]}'"
+    }
+
+    "concat({out})"
+}
+
+fn parse-simple-selector(simple: String) -> String {
+    let chars = simple.chars()
+    let i = 0
+    let n = #chars
+
+    let tagname = '*'
+
+    if i < n {
+        if chars[i] == '*' {
+            tagname = '*'
+            i += 1
+        } else if is-name-char(chars[i]) {
+            tagname = ''
+            while i < n && is-name-char(chars[i]) {
+                tagname += chars[i]
+                i += 1
+            }
+        }
+    }
+
+    let preds = []
+
+    fn skip-ws() {
+        while i < n && is-space(chars[i]) { i += 1 }
+    }
+
+    while i < n {
+        let ch = chars[i]
+
+        if ch == '#' {
+            i += 1
+            let id = ''
+            while i < n && is-name-char(chars[i]) {
+                id += chars[i]
+                i += 1
+            }
+            preds.push("@id={xpath-literal(id)}")
+            continue
+        }
+
+        if ch == '.' {
+            i += 1
+            let cls = ''
+            while i < n && is-name-char(chars[i]) {
+                cls += chars[i]
+                i += 1
+            }
+            preds.push("contains(concat(' ', normalize-space(@class), ' '), ' {cls} ')")
+            continue
+        }
+
+        if ch == '[' {
+            i += 1
+            skip-ws()
+            let name = ''
+            while i < n && is-name-char(chars[i]) {
+                name += chars[i]
+                i += 1
+            }
+            skip-ws()
+
+            let val: ?String = nil
+
+            if i < n && chars[i] == '=' {
+                i += 1
+                skip-ws()
+
+                if i < n && (chars[i] == '"' || chars[i] == "'") {
+                    let quote = chars[i]
+                    i += 1
+                    let buf = ''
+                    while i < n && chars[i] != quote {
+                        buf += chars[i]
+                        i += 1
+                    }
+                    if i < n && chars[i] == quote { i += 1 }
+                    val = buf
+                } else {
+                    let buf = ''
+                    while i < n && chars[i] != ']' {
+                        if !is-space(chars[i]) { buf += chars[i] }
+                        i += 1
+                    }
+                    val = buf
+                }
+            }
+
+            while i < n && chars[i] != ']' { i += 1 }
+            if i < n && chars[i] == ']' { i += 1 }
+
+            if val != nil {
+                let v = val ?? ''
+                preds.push("@{name}={xpath-literal(v)}")
+            } else if name != '' {
+                preds.push("@{name}")
+            }
+
+            continue
+        }
+
+        i += 1
+    }
+
+    if #preds == 0 {
+        return tagname
+    }
+
+    "{tagname}[{preds.join(' and ')}]"
+}
+
+fn tokenize-selector(selector: String) -> Array[(String, String)] {
+    let chars = selector.chars()
+    let n = #chars
+    let out = []
+    let comb = ' '
+    let buf = ''
+    let depth = 0
+    let quote = ''
+
+    fn flush() {
+        let simple = buf.strip()
+        if simple != '' {
+            out.push((comb, simple))
+            buf = ''
+            comb = ' '
+        } else {
+            buf = ''
+        }
+    }
+
+    for i in ..n {
+        let ch = chars[i]
+
+        if quote != '' {
+            buf += ch
+            if ch == quote { quote = '' }
+            continue
+        }
+
+        if ch == '"' || ch == "'" {
+            quote = ch
+            buf += ch
+            continue
+        }
+
+        if ch == '[' {
+            depth += 1
+            buf += ch
+            continue
+        }
+
+        if ch == ']' {
+            depth -= 1
+            buf += ch
+            continue
+        }
+
+        if depth == 0 && ch == '>' {
+            flush()
+            comb = '>'
+            continue
+        }
+
+        if depth == 0 && is-space(ch) {
+            if buf != '' {
+                flush()
+            }
+            continue
+        }
+
+        buf += ch
+    }
+
+    flush()
+    out
+}
+
+fn split-groups(selector: String) -> Array[String] {
+    let chars = selector.chars()
+    let n = #chars
+    let i = 0
+    let buf = ''
+    let out = []
+    let depth = 0
+    let quote = ''
+
+    while i < n {
+        let ch = chars[i]
+
+        if quote != '' {
+            buf += ch
+            if ch == quote { quote = '' }
+            i += 1
+            continue
+        }
+
+        if ch == '"' || ch == "'" {
+            quote = ch
+            buf += ch
+            i += 1
+            continue
+        }
+
+        if ch == '[' {
+            depth += 1
+            buf += ch
+            i += 1
+            continue
+        }
+
+        if ch == ']' {
+            depth -= 1
+            buf += ch
+            i += 1
+            continue
+        }
+
+        if ch == ',' && depth == 0 {
+            let part = buf.strip()
+            if part != '' { out.push(part) }
+            buf = ''
+            i += 1
+            continue
+        }
+
+        buf += ch
+        i += 1
+    }
+
+    let tail = buf.strip()
+    if tail != '' { out.push(tail) }
+
+    out
+}
+
+fn css-to-xpath(selector: String) -> String {
+    let s = selector.strip()
+    if s == '' { return '' }
+
+    if s.starts?('/') || s.starts?('./') {
+        return s
+    }
+
+    let groups = split-groups(s)
+    let xpaths = []
+
+    for group in groups {
+        let tokens = tokenize-selector(group)
+        if (#tokens == 1) && group.match?(/>/) {
+            let parts = group.split('>').map(\_.strip()).filter(\_ != '')
+            tokens = []
+            for i in ..#parts {
+                tokens.push(((i == 0) ? ' ' : '>', parts[i]))
+            }
+        }
+        let xp = ''
+
+        for i in ..#tokens {
+            let (comb, simple) = tokens[i]
+            let seg = parse-simple-selector(simple)
+            let axis = if i == 0 {
+                '//'
+            } else if comb == '>' {
+                '/'
+            } else {
+                '//'
+            }
+            xp = "{xp}{axis}{seg}"
+        }
+
+        if xp != '' { xpaths.push(xp) }
+    }
+
+    xpaths.join(' | ')
+}
+
+fn strip-tags(html: String) -> String {
+    html.sub(/<[^>]+>/, ' ').sub(/\s+/, ' ').strip()
+}
+
+fn escape-text(s: String) -> String {
+    s.sub('&', '&amp;')
+     .sub('<', '&lt;')
+     .sub('>', '&gt;')
+     .sub('"', '&quot;')
+     .sub("'", '&#39;')
+     .sub(/[\N{U+0000}-\N{U+001F}\N{U+007F}-\N{U+FFFF}]/u, [_, ch] -> "&#{ord(ch)};")
+}
+
+fn unescape-text(s: String) -> String {
+    s.sub(/&#x([0-9A-Fa-f]+);/, [_, hex] -> chr(int(hex, 16)))
+     .sub(/&#(\d+);/, [_, dec] -> chr(int(dec)))
+     .sub('&lt;', '<')
+     .sub('&gt;', '>')
+     .sub('&quot;', '"')
+     .sub('&#39;', "'")
+     .sub('&amp;', '&')
+}
+
+fn node-text(node: xml.XMLNode) -> String {
+    unescape-text(strip-tags(node.outerXML))
+}
+
+fn parse-fragment(markup: String) -> xml.Document {
+    let buf = Blob()
+    buf.push("<root>")
+    buf.push(markup)
+    buf.push("</root>")
+    buf.push(0)
+    xml.parse(buf, nil, nil, xml.XML_PARSE_NOBLANKS)
+}
+
+fn is-descendant(node: xml.XMLNode, ancestor: xml.XMLNode, include-self: Bool = false) -> Bool {
+    for let cur = include-self ? node : node.parent; cur != nil; cur = cur.parent {
+        if cur == ancestor { return true }
+    }
+    false
+}
+
+class Selection : Iterable[Element] {
+    __doc: xml.Document
+    __nodes: Array[xml.XMLNode]
+
+    init(doc: xml.Document, nodes: ?Array[xml.XMLNode]) {
+        __doc = doc
+        __nodes = nodes ?? []
+    }
+
+    #() -> Int {
+        #__nodes
+    }
+
+    count -> Int { #__nodes }
+
+    [](index: Int) -> Element {
+        Element(__doc, __nodes[index])
+    }
+
+    first() -> ?Element {
+        (#__nodes > 0) ? Element(__doc, __nodes[0]) : nil
+    }
+
+    last() -> ?Element {
+        (#__nodes > 0) ? Element(__doc, __nodes[-1]) : nil
+    }
+
+    attr(name: String) -> String | nil {
+        if let $t = first() { t[name] }
+    }
+
+    text() -> String {
+        __nodes.map(n -> node-text(n)).join(' ').strip()
+    }
+
+    select(css: String) -> Selection {
+        let xpath = css-to-xpath(css)
+        let nodes = [*__doc.select(xpath)]
+        let filtered = [n for n in nodes if __nodes.any?(base -> is-descendant(n, base, false))]
+        Selection(__doc, filtered)
+    }
+
+    find(css: String) -> ?Element {
+        select(css).first()
+    }
+
+    find-all(css: String) -> Selection {
+        select(css)
+    }
+
+    filter(pred: Element -> Any) -> Selection {
+        Selection(__doc, __nodes.filter(n -> pred(Element(__doc, n))))
+    }
+
+    __iter__() -> Iter[Element] {
+        [Element(__doc, node) for node in __nodes].__iter__()
+    }
+}
+
+class Element : Iterable[Element] {
+    __doc: xml.Document
+    __node: xml.XMLNode
+
+    init(doc: xml.Document, node: xml.XMLNode) {
+        __doc = doc
+        __node = node
+    }
+
+    name -> String { __node.name }
+    node() -> xml.XMLNode { __node }
+    text -> String { node-text(__node) }
+    text=(val: String) -> String {
+        clear()
+        let doc = parse-fragment(escape-text(val))
+        for child in doc.root.children {
+            __node.addChild(child)
+        }
+        val
+    }
+    inner-html -> String {
+        [child.outerXML for child in __node.children].join('')
+    }
+    outer-html -> String { __node.outerXML }
+    html -> String { inner-html }
+    html=(val: String) -> String {
+        clear()
+        append-html(val)
+        val
+    }
+
+    attrs -> Dict[String, String] { __node.props.dict }
+
+    attr(key: String) -> String | nil { __node.props[key] }
+    [](key: String) -> String | nil { __node.props[key] }
+    []=(key: String, val: String) -> String { __node.props[key] = val }
+
+    has-attr(key: String) -> Bool {
+        __node.props.contains?(key)
+    }
+
+    remove-attr(key: String) -> String | nil {
+        __node.props.delete(key)
+    }
+
+    id -> String | nil { self['id'] }
+    id=(val: String) -> String { self['id'] = val }
+
+    classes -> Array[String] {
+        (self['class'] ?? '').words()
+    }
+
+    has-class(name: String) -> Bool {
+        name in classes
+    }
+
+    add-class(name: String) {
+        let existing = classes
+        if name not in existing {
+            existing.push(name)
+            self['class'] = existing.join(' ')
+        }
+    }
+
+    remove-class(name: String) {
+        let xs = classes.filter(\_ != name)
+        if #xs == 0 {
+            remove-attr('class')
+        } else {
+            self['class'] = xs.join(' ')
+        }
+    }
+
+    toggle-class(name: String) {
+        if has-class(name) {
+            remove-class(name)
+        } else {
+            add-class(name)
+        }
+    }
+
+    parent -> ?Element {
+        if let $p = __node.parent { Element(__doc, p) }
+    }
+
+    next -> ?Element {
+        if let $p = __node.next { Element(__doc, p) }
+    }
+
+    prev -> ?Element {
+        if let $p = __node.prev { Element(__doc, p) }
+    }
+
+    children* -> Generator[Element] {
+        for child in __node.children {
+            yield Element(__doc, child)
+        }
+    }
+
+    select(css: String) -> Selection {
+        let xpath = css-to-xpath(css)
+        let nodes = [*__doc.select(xpath)]
+        let filtered = [n for n in nodes if is-descendant(n, __node, false)]
+        Selection(__doc, filtered)
+    }
+
+    find(css: String) -> ?Element {
+        select(css).first()
+    }
+
+    find-all(css: String) -> Selection {
+        select(css)
+    }
+
+    remove() {
+        __node.unlink()
+    }
+
+    clear() {
+        let kids = [*__node.children]
+        for child in kids { child.unlink() }
+    }
+
+    append-html(markup: String) {
+        let doc = parse-fragment(markup)
+        for child in doc.root.children {
+            __node.addChild(child)
+        }
+    }
+
+    unwrap() {
+        if let $p = __node.parent {
+            let kids = [*__node.children]
+            for child in kids {
+                p.addChild(child)
+            }
+            __node.unlink()
+        }
+    }
+
+    __iter__() -> Generator[Element] {
+        children
+    }
+}
+
+class Html {
+    __doc: xml.Document
+
+    init(doc: xml.Document) {
+        __doc = doc
+    }
+
+    root -> Element { Element(__doc, __doc.root) }
+    text -> String { node-text(__doc.root) }
+
+    select(css: String) -> Selection {
+        let xpath = css-to-xpath(css)
+        Selection(__doc, [*__doc.select(xpath)])
+    }
+
+    select-one(css: String) -> ?Element {
+        select(css).first()
+    }
+
+    select-all(css: String) -> Selection {
+        select(css)
+    }
+
+    find(css: String) -> ?Element {
+        select(css).first()
+    }
+
+    find-all(css: String) -> Selection {
+        select(css)
+    }
+
+    [](css: String) -> Selection {
+        select(css)
+    }
+
+    dump(dest: ?(String | Path) = nil) -> String {
+        let out = __doc.root.outerXML
+        if let $d = dest {
+            Path(d).write(out)
+        }
+        out
+    }
+}
+
+pub fn parse(
+    doc: String | Blob,
+    url: ?String = nil,
+    encoding: ?String = nil,
+    options: Int = xml.XML_PARSE_NOBLANKS
+) -> Html {
+    Html(xml.parse(doc, url, encoding, options))
+}
+
+pub fn read(
+    path: String,
+    encoding: ?String = nil,
+    options: Int = xml.XML_PARSE_NOBLANKS
+) -> Html {
+    Html(xml.read(path, encoding, options))
+}
+
+pub fn html(parts: Array[Any]) -> Html {
+    let cooked = []
+
+    for match parts {
+        str: String => {
+            cooked.push(str)
+        },
+
+        t: Element => {
+            cooked.push((t.node(), nil))
+        },
+
+        s: Html => {
+            cooked.push((s.root.node(), nil))
+        },
+
+        n: xml.XMLNode => {
+            cooked.push((n, nil))
+        },
+
+        (s: String, *) => {
+            cooked.push((escape-text(s), nil))
+        },
+
+        (t: Element, *) => {
+            cooked.push((t.node(), nil))
+        },
+
+        (s: Html, *) => {
+            cooked.push((s.root.node(), nil))
+        },
+
+        (n: xml.XMLNode, *) => {
+            cooked.push((n, nil))
+        },
+
+        (x, *) => {
+            cooked.push((x, nil))
+        }
+    }
+
+    Html(xml.xml(cooked))
+}

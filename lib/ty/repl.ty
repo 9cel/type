@@ -1,0 +1,41 @@
+import readln (readln)
+import ty (bt)
+import ty.parse as parse
+
+pub macro repl(cond, *exprs) {
+    let sourceStrings = exprs.map(&.src)
+    let width = sourceStrings.map(&len).max() ?? 0
+    let formatString = "%{width}s"
+
+    let prints = ty.Multi([
+        $$[ print(fmt($$(ty.Value(formatString)), $$(ty.Value(s))), '=', $$(e), sep: ' ') $$]
+        for (e, s) in zip(exprs, sourceStrings)
+    ])
+
+    $$[
+        if $$(cond ?? ty.Value(true)) {
+            let trace = $$(ty.Value(bt))()
+
+            if #trace > 0 {
+                print('Call stack:')
+                print(["  {func} at {file}:{line}" for (_, func, file, line, _) in trace].unlines())
+            }
+
+            let x = nil
+
+            $$(prints)
+
+            while let $line = ($$(ty.Value(readln)))('>>> ', erase: false) {
+                try {
+                    x = __eval__(line)
+                    print(x)
+                } catch Err(msg) {
+                    print(msg)
+                }
+                $$(prints)
+            }
+
+            x
+        }
+    $$]
+}

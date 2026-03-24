@@ -1,0 +1,886 @@
+import ty
+import ty.parse
+import ty.token
+import json
+
+class UnknownStyleError < RuntimeError {
+    __chalk: Chalk
+    __src:   String
+    __style: String
+
+
+    init(style: String, src: String, chalk: Chalk) {
+        __chalk = chalk
+        __src   = src
+        __style = style
+    }
+
+    what -> String {
+        "Unknown style '{__style}' in chalk text: '{__src}'"
+    }
+}
+
+pub use TermStyle = {
+    ?bold:      ?Bool,
+    ?italic:    ?Bool,
+    ?underline: ?Array[Int],
+    ?dim:       ?Bool,
+    ?reverse:   ?Bool,
+    ?fg:        ?Array[Int],
+    ?bg:        ?Array[Int],
+    ?uc:        ?Array[Int],
+    ?fg-bright: ?Bool,
+    ?bg-bright: ?Bool,
+    ?link:      ?String
+}
+
+
+pub use ChalkStyle = {
+    ?bold:      ?String,
+    ?italic:    ?String,
+    ?underline: ?String,
+    ?dim:       ?String,
+    ?reverse:   ?String,
+    ?fg:        ?String,
+    ?bg:        ?String,
+    ?uc:        ?String,
+    ?fg-bright: ?String,
+    ?bg-bright: ?String,
+    ?link:      ?String
+}
+
+// Some nice colors :)
+//
+// blue:   #1d55c6
+// green:  #6cad65
+// yellow: #e5b211
+// pink:   #e94db2
+// purple: #a571ce
+// red:    #dd203c
+// gray:   #726157
+// orange: #ed6d18
+// white:  #f1d2a5
+
+use match RGB {
+    /^#[[:xdigit:]]+$/ => do {
+        let hex = match #$0 {
+            4 => $0[1;].sub(/./, \"{$1}{$1}"),
+            7 => $0[1;]
+        }
+        match hex.scan(/../).map(int@(_, 16)) {
+            [r, g, b] => (r, g, b)
+        }
+    },
+
+    (r: Int, g: Int, b: Int) => (r, g, b)
+}
+
+pub fn escape(text: String) -> String {
+    text.sub(/\[|\\/, %{'[': '\\[', '\\': '\\\\'}[])
+}
+
+fn enables-of(trans: _) -> String {
+    trans.matches(/\[([^]\/]*)\]/).map(\_[1].words()).flat().unwords() ?? ''
+}
+
+fn disables-of(trans: _) -> String {
+    trans.matches(/\[\/([^]\/]*)\]/).map(\_[1].words()).flat().unwords() ?? ''
+}
+
+fn flip(trans: String) -> String {
+    let on = enables-of(trans)
+    let off = disables-of(trans)
+
+    let (on, off) = (off && "[{off}]", on && "[/{on}]")
+
+    "{on}{off}"
+}
+
+fn split(text: String, i: Int, greedy?: Bool = true) -> (String, String) {
+    let off = 0
+    let width = 0
+    let matches = text.scan(/\x1b\[[^m]*m(*SKIP)(*FAIL)|[^\x1b]+/v)
+
+    let stop = greedy? ? (\width > i) : (\width >= i)
+
+    for _match in matches while !stop() {
+        off = min(_match.end, _match.start + (i - width))
+        width += #_match
+    }
+
+    text.split(off)
+}
+
+let styles: Dict[String, TermStyle] = %{
+    'b':            {bold: true},
+    'no-b':         {bold: false},
+    'bold':         {bold: true},
+    'no-bold':      {bold: false},
+
+    'i':            {italic: true},
+    'no-i':         {italic: false},
+    'italic':       {italic: true},
+    'no-italic':    {italic: false},
+
+    'dim':          {dim: true},
+    'reverse':      {reverse: true},
+
+    'no-uc':        {uc: [59]},
+
+    'u':            {underline: [4]},
+    'no-u':         {underline: [24]},
+
+    'underline':    {underline: [4]},
+    'no-underline': {underline: [24]},
+
+    'uu':           {underline: [4, 2]},
+    'u~':           {underline: [4, 3]},
+    'u.':           {underline: [4, 4]},
+    'u-':           {underline: [4, 5]},
+
+    'no-fg':        {fg: [39]},
+    'black':        {fg: [30]},
+    'red':          {fg: [31]},
+    'green':        {fg: [32]},
+    'yellow':       {fg: [33]},
+    'blue':         {fg: [34]},
+    'magenta':      {fg: [35]},
+    'cyan':         {fg: [36]},
+    'white':        {fg: [37]},
+
+    'no-bg':        {bg: [49]},
+    'bg-black':     {bg: [40]},
+    'bg-red':       {bg: [41]},
+    'bg-green':     {bg: [42]},
+    'bg-yellow':    {bg: [43]},
+    'bg-blue':      {bg: [44]},
+    'bg-magenta':   {bg: [45]},
+    'bg-cyan':      {bg: [46]},
+    'bg-white':     {bg: [47]},
+
+    'bright':       {bright: true},
+    'bg-bright':    {bg-bright: true}
+}
+
+fn record-of(attrs: String, start: _ = {}) -> _ {
+    let props = start
+
+    let name = match {
+        1 => 'red',
+        2 => 'green',
+        3 => 'yellow',
+        4 => 'blue',
+        5 => 'magenta',
+        6 => 'cyan',
+        7 => 'white',
+        _ => nil
+    }
+
+    let pattern = /([345]8[:;]2(?:[:;]\d{1,3}){3})|(\d+:\d+(?::\d+)*)|;/
+
+    for match attrs.split(pattern).map(n -> int(n) ?? n) {
+        /38.2.(\d+).(\d+).(\d+)/ => {
+            props = {*props, fg: "#{int($1):02x}{int($2):02x}{int($3):02x}"}
+        },
+
+        /48.2.(\d+).(\d+).(\d+)/ => {
+            props = {*props, bg: "bg-#{int($1):02x}{int($2):02x}{int($3):02x}"}
+        },
+
+        /58.2.(\d+).(\d+).(\d+)/ => {
+            props = {*props, uc: "uc-#{int($1):02x}{int($2):02x}{int($3):02x}"}
+        },
+
+        /4:(\d)/ => {
+            props = {
+                *props,
+                underline: match int($1) {
+                    0 => false,
+                    1 => 'u',
+                    2 => 'uu',
+                    3 => 'u~',
+                    4 => 'u.',
+                    5 => 'u-'
+                }
+            }
+        },
+
+        0 => props = {
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            reverse: false,
+            fg: false,
+            bg: false,
+            uc: false,
+            fg-bright: nil,
+            bg-bright: nil
+        },
+
+        1 => props = {*props, bold: 'b' },
+        3 => props = {*props, italic: 'i' },
+        4 => props = {*props, underline: 'u' },
+        7 => props = {*props, reverse: 'reverse' },
+
+        22 => props = {*props, bold: false },
+        23 => props = {*props, italic: false },
+        24 => props = {*props, underline: false },
+        27 => props = {*props, reverse: false },
+
+        39 => props = {*props, fg-bright: nil, fg: false },
+        49 => props = {*props, bg-bright: nil, bg: false },
+        59 => props = {*props, uc: false },
+
+        fg ::  31...39  => props = {*props, fg: name(fg - 30)},
+        fg ::  91...99  => props = {*props, bright: 'bright', fg: name(fg - 90)},
+
+        bg ::  41...49  => props = {*props, bg: "bg-{name(bg - 40)}"},
+        bg :: 101...109 => props = {*props, bg-bright: 'bg-bright', bg: "bg-{name(bg - 100)}"},
+
+        _ => ()
+    }
+
+    props
+}
+
+@memoized
+fn detrans(a: _, b: _) -> String {
+    let on  = []
+    let off = []
+
+    let a: _ = %{**a}
+    let b: _ = %{**b}
+
+    bright-unfix(a)
+    bright-unfix(b)
+
+    a = %{key: val for key, val in a if val != nil}
+    b = %{key: val for key, val in b if val != nil}
+
+    for key, val in b if a[key] != val {
+        match (key, val) {
+            ('link', _) => on.push("link={val}"),
+            (_, false) => {
+                if key in a {
+                    off.push(key)
+                }
+            },
+            _ => on.push(val)
+        }
+    }
+
+    if a['link'] and !b['link'] {
+        off.push('link')
+    }
+
+    let trans = on ? "[{on.unwords()}]" : ''
+    let trans = off ? "[/{off.unwords()}]{trans}" : trans
+
+    trans
+}
+
+pub fn parse(text: String, start: _ = {}) -> String {
+    let out = Blob()
+    let props = start
+    let style = start
+
+    fn push(text, st) {
+        out.push(detrans(style, st))
+        out.push(escape(text))
+        style = st
+    }
+
+    for match text.split(/\x1b\[([^m]*)m|\x1b\]8;;([^\x1b]*)\x1b\\/v) {
+        m: RegexMatch => {
+            match m.groups {
+                [_, $sgr, *]      => props = record-of(sgr, start=props),
+                [_, _, '' or nil] => props = {*props, link: nil},
+                [_, _, url]       => props = {*props, link: url},
+            }
+        },
+        text => {
+            push(text, props)
+        }
+    }
+
+    push('', start)
+
+    out.str!()
+}
+
+pub class Text {
+    __text: String
+    __chalk: Chalk
+    __fmt: String | nil
+
+    init(text: String, chalk: Chalk, fmt=nil) {
+        __text = text
+        __chalk = chalk
+        __fmt = fmt
+    }
+
+    chalk { __chalk }
+
+    __str__() -> String {
+        "{__chalk.render(__text)}"
+    }
+
+    __fmt__(spec: ?String) -> String {
+        let spec = spec ?? __fmt
+        spec ? "[%{spec}]{__text}[/]" : __text
+    }
+
+    #() -> Int {
+        #plain
+    }
+
+    src -> String { __text }
+
+    plain -> String {
+        __chalk.render(__text, plain=true)
+    }
+
+    width() -> Int {
+        plain.width()
+    }
+
+    +(other: Text) -> Text {
+        (__chalk"{self}{other}")
+    }
+
+    spans -> Array[(TermStyle, String)] {
+        __chalk.spans(__text)
+    }
+
+    wrap(width: Int) -> Array[Text] {
+        let spans = spans.reverse()
+        let lines = []
+
+        let remain = width
+        let line   = Blob()
+
+        fn next() {
+            lines.push(Text(line.str!(), __chalk))
+            line.clear()
+            remain = width
+        }
+
+        fn add(style: TermStyle, text: String) {
+            let state = {}
+            for [_, attr] in trans({}, style).scan(/\x1b\[([^m]+)m/) {
+                state = record-of(attr, start=state)
+            }
+
+            line.push(detrans({}, state))
+            line.push(escape(text))
+            line.push('[/]')
+
+            remain -= text.width()
+        }
+
+        while spans {
+            let (style, text) = spans.pop()
+
+            if let $i = text.search('\n') {
+                let (line, rest) = text.split(i)
+                spans.push((style, rest + 1))
+                spans.push((style, line))
+                remain = min(remain, line.width())
+            } else if text.width() > remain {
+                if remain < width / 3 {
+                    spans.push((style, text))
+                    next()
+                } else {
+                    let i = text.searchr(/\s/, remain) ?? remain
+                    let (keep, push) = text.split(i)
+                    spans.push((style, push.comb(/^ /)))
+                    add(style, keep)
+                    next()
+                }
+            } else {
+                add(style, text)
+            }
+        }
+
+        if #line > 0 {
+            next()
+        }
+
+        lines
+    }
+
+    style-span(
+        span: (Int, Int),
+        style: String
+    ) -> Text {
+        let (i, j) = span
+
+        let full = __chalk.render(__text)
+
+        let (pre, rest) = split(full, i)
+        let (text, post) = split(rest, j - i)
+
+        let text = __chalk.render("[{style}]{parse(text)}[/{style}]")
+        let src = parse("{pre}{text}{post}")
+
+        Text(src, __chalk)
+    }
+}
+
+use FloatRange = Float | (Float, Float)
+
+pub fn randf(lo: Float, hi: Float) -> Float {
+    lo + (hi - lo)*rand()
+}
+
+pub fn rand-hsl(
+    h: FloatRange = (0.0, 1.0),
+    s: FloatRange = (0.4, 1.0),
+    l: FloatRange = (0.6, 0.75)
+) -> (Float, Float, Float) {
+    fn sample(x: FloatRange) match x {
+        (lo, hi) => randf(lo, hi),
+        x        => x
+    }
+    (sample(h), sample(s), sample(l))
+}
+
+fn parse-style(style: String, chalk: Chalk) -> TermStyle | nil {
+    match style {
+        /.*\?$/ => do {
+            let (h, s, l) = rand-hsl()
+            let (r, g, b) = hsl-to-rgb(h, s, l)
+            ({fg: [38, 2, r, g, b]})
+        },
+
+        RGB(r, g, b) => ({fg: [38, 2, r, g, b]}),
+
+        /^bg-(.*)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({bg: [k + 10, *ks]}),
+            _                 => nil
+        },
+
+        /^uc-(.+)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({uc: [k + 20, *ks]}),
+            _                 => nil
+        },
+
+        /^u--(.*)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({uc: [k + 20, *ks], underline: [4, 5]}),
+            _                 => nil
+        },
+
+        /^u\.-(.*)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({uc: [k + 20, *ks], underline: [4, 4]}),
+            _                 => nil
+        },
+
+        /^u~(.*)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({uc: [k + 20, *ks], underline: [4, 3]}),
+            _                 => nil
+        },
+
+        /^uu-(.*)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({uc: [k + 20, *ks], underline: [4, 2]}),
+            _                 => nil
+        },
+
+        /^u-(.+)$/ => match parse-style($1, chalk) {
+            {fg: [k, *ks], *} => ({uc: [k + 20, *ks], underline: [4]}),
+            _                 => nil
+        },
+
+        /^link=(.+)$/ => ({link: $1}),
+
+        _ => nil
+    }
+}
+
+fn bright-fix(style) {
+    if let [int ~> fg] = style['fg'] and 'bright' in style {
+        style['fg'] = [fg + 60]
+    }
+    if let [int ~> bg] = style['bg'] and 'bg-bright' in style {
+        style['bg'] = [bg + 60]
+    }
+    style.remove('bright')
+    style.remove('bg-bright')
+}
+
+pub fn bright-unfix(style) {
+    style.remove('bright')
+    style.remove('bg-bright')
+    if let [int ~> fg] = style['fg'] and fg in 90...99 {
+        style['fg'] = [fg - 60]
+        style['bright'] = true
+    }
+    if let [int ~> bg] = style['bg'] and bg in 100...109 {
+        style['bg'] = [bg - 60]
+        style['bg-bright'] = true
+    }
+}
+
+@memoized
+pub fn trans(a: TermStyle, b: TermStyle) -> String {
+    let a: _ = %{**a}
+    let b: _ = %{**b}
+
+    bright-fix(a)
+    bright-fix(b)
+
+    let attrs: [Int | String] = []
+
+    for key, val in b if a[key] != val {
+        match key {
+            'fg' or 'bg' or 'uc'       => attrs.push(val.join(';')),
+            'underline' :: val != nil  => attrs.push(val.join(':')),
+            'bold'      :: val != nil  => attrs.push(1),
+            'italic'    :: val != nil  => attrs.push(3),
+            'reverse'   :: val != nil  => attrs.push(7),
+            _                          => ()
+        }
+    }
+
+    attrs += (a - b).keys().map?(match {
+        'fg'        => Some(39),
+        'bg'        => Some(49),
+        'uc'        => Some(59),
+        'bold'      => Some(22),
+        'italic'    => Some(23),
+        'underline' => Some(24),
+        'reverse'   => Some(27),
+        _           => None
+    })
+
+    let combined = ["\x1b[{it}m" for attrs].join()
+
+    let a-link = a['link']
+    let b-link = b['link']
+
+    return (a-link == b-link) ? combined
+         : (b-link == nil)    ? "{combined}\x1b]8;;\x1b\\"
+         :                      "{combined}\x1b]8;;{b-link}\x1b\\"
+}
+
+pub class Chalk {
+    __styles: Dict[String, TermStyle | nil]
+
+    init() {
+        __styles = %{**styles, *: parse-style(it, self)}
+    }
+
+    render(text: String, plain: Bool = false) {
+        let parts = text.split(/(?:\\\\)|(?:\\\[)|\[([\/%]+)?([^]]*)\]/v)
+
+        let stack: _ = [[{}]]
+        let style: TermStyle = {}
+        let out = Blob()
+        let ostack = []
+
+        fn update() {
+            let new-style = stack.flat().fold({}, \{*_, *_})
+            out.push(trans(style, new-style))
+            style = new-style
+        }
+
+#|if (getenv('NO_COLOR') != nil) || (ty.color == 'never')
+        plain = true
+#|]
+
+        fn get-style(name) {
+            match __styles[name] {
+                $style => style,
+                _      => throw UnknownStyleError(name, text, self)
+            }
+        }
+
+        fn finish-fmt(fmt: String) {
+            ostack[-1].push("{out.str!():{fmt}}")
+            out = ostack.pop()
+        }
+
+        fn stops(stop, style) {
+            match (stop, style) {
+                ('fg',        {fg, ?bright})    => true,
+                ('bg',        {bg, ?bg-bright}) => true,
+                ('uc',        {uc, ?underline}) => true,
+                ('u',         {underline, ?uc}) => true,
+                ('underline', {underline, ?uc}) => true,
+                ('link',      {link})           => true,
+
+                _  => (style == __styles[stop])
+            }
+        }
+
+        let clean = \_.sub(/\\./, &[1])
+
+        for match parts {
+            part: String
+                => out.push(clean(part)),
+
+            RegexMatch({groups: [escaped]})
+                => out.push(escaped[1;]),
+
+            RegexMatch({captures}) => if !plain {
+                match captures {
+                    [nil, &words $~> styles] => {
+                        stack.push(styles.map(get-style))
+                        update()
+                    },
+
+                    ['%', fmt] => {
+                        ostack.push(out)
+                        out = Blob()
+                        stack.push({fmt})
+                    },
+
+                    [&len ~> n, &words $~> []] => {
+                        for ..min(n, #stack) {
+                            match stack.pop() {
+                                {fmt} => finish-fmt(fmt),
+                                _     => update()
+                            }
+                        }
+                    },
+
+                    [_, &words $~> styles] => {
+                        for style in styles {
+                            for entry in stack[;;-1] if entry :: Array {
+                                if let $ii = entry.searchr-by(\style `stops` _) {
+                                    entry.pop(ii)
+                                    break
+                                }
+                            }
+                        }
+                        stack.filter!(\#_ > 0)
+                        update()
+                    }
+                }
+            }
+        }
+
+        for match stack {
+            {fmt} => finish-fmt(fmt),
+            _     => ()
+        }
+
+        stack.filter!(\!matches?(_, {fmt}))
+
+        if !plain {
+            update()
+            out.push("\x1b[0m")
+        }
+
+        out.str!()
+    }
+
+    spans(text: String) -> [(TermStyle, String)] {
+        let parts = text.split(/(?:\\\\)|(?:\\\[)|\[([\/%]+)?([^]]*)\]/v)
+
+        let spans: [(TermStyle, String)] = []
+
+        let stack: _ = [[{}]]
+        let style: TermStyle = {}
+
+        fn update() {
+            style = stack.flat().fold({}, \{*_, *_})
+        }
+
+        fn get-style(name) {
+            match __styles[name] {
+                $style => style,
+                _      => throw UnknownStyleError(name, text, self)
+            }
+        }
+
+        fn stops(stop, style) {
+            match (stop, style) {
+                ('fg',        {fg, ?bright})    => true,
+                ('bg',        {bg, ?bg-bright}) => true,
+                ('uc',        {uc, ?underline}) => true,
+                ('u',         {underline, ?uc}) => true,
+                ('underline', {underline, ?uc}) => true,
+                ('link',      {link})           => true,
+                _  => (style == __styles[stop])
+            }
+        }
+
+        for match parts {
+            part: String
+                => spans.push((style, part.sub(/\\./, &[1;]))),
+
+            RegexMatch({groups: [escaped]})
+                => spans.push((style, escaped[1;])),
+
+            RegexMatch({captures}) => {
+                match captures {
+                    [nil, &words $~> styles] => {
+                        stack.push(styles.map(get-style))
+                        update()
+                    },
+
+                    ['%', fmt] => {
+                        throw 'TODO'
+                    },
+
+                    [&len ~> n, &words $~> []] => {
+                        for ..min(n, #stack) {
+                            match stack.pop() {
+                                {fmt} => {},
+                                _     => update()
+                            }
+                        }
+                    },
+
+                    [_, &words $~> styles] => {
+                        for style in styles {
+                            for entry in stack[;;-1] if entry :: Array {
+                                if let $ii = entry.searchr-by(\style `stops` _) {
+                                    entry.pop(ii)
+                                }
+                            }
+                        }
+                        stack.filter!(\#_ > 0)
+                        update()
+                    }
+                }
+            }
+        }
+
+        spans
+    }
+
+    print(*xs, %kwargs) {
+        ::print(
+            *xs.map(match { x: Text => self.render(x.src), x => x }),
+            **kwargs
+        )
+    }
+
+    __missing__=(name, style: String) {
+        __styles[name] = style.words().map(__styles[]).fold(\{*_, *_})
+    }
+
+    __missing__(name) {
+        __styles[name]
+    }
+
+    __call__(parts: _) -> Text {
+        Text(
+            parts.map(match {
+                s: String   => s,
+                (x, fmt, w) => (
+                      (x :: Text) ? x.__fmt__(fmt)
+                    : parse(fmt ? x.__fmt__(fmt, w) : x.__str__())
+                )
+            }).join(),
+            self
+        )
+    }
+
+    [](style: Any) -> (Any -> Text) {
+        x -> self"[{style}]{x}[/]"
+    }
+
+    plain(text: Text | String) -> String {
+        (self"{text}").plain
+    }
+
+    text(text: String) -> Text {
+        Text(text, self)
+    }
+}
+
+pub fn strip(text: String) -> String {
+    text.comb(/\x1b\[[^m]*m|\x1b\]8;[^\x1b]*\x1b\\/)
+}
+
+pub fn hue-to-rgb(p: Float, q: Float, t: Float) -> Float {
+  if t < 0.0 { t += 1.0 }
+  if t > 1.0 { t -= 1.0 }
+  if t < 1.0/6 { return p + (q - p) * 6 * t }
+  if t < 1.0/2 { return q }
+  if t < 2.0/3 { return p + (q - p) * (2.0/3.0 - t) * 6.0 }
+  p
+}
+
+pub fn hsl-to-rgb(h: Float, s: Float, l: Float) -> (Int, Int, Int) {
+  let (r, g, b) = if s < 0.0001 {
+        (l, l, l)
+  } else {
+    let q = (l < 0.5) ? l * (1.0 + s) : (l + s - l * s)
+    let p = 2.0 * l - q
+    (
+        hue-to-rgb(p, q, h + 1.0/3.0),
+        hue-to-rgb(p, q, h),
+        hue-to-rgb(p, q, h - 1.0/3.0)
+    )
+  }
+
+  (iround(r * 255), iround(g * 255), iround(b * 255))
+}
+
+pub fn hsl-hex(h, s, l) {
+    let (r, g, b) = hsl-to-rgb(h, s, l)
+    "#{r:02x}{g:02x}{b:02x}"
+}
+
+pub fn random(
+    h: FloatRange = (0.0, 1.0),
+    s: FloatRange = (0.4, 1.0),
+    l: FloatRange = (0.6, 0.75)
+) {
+    return hsl-hex(*rand-hsl(h, s, l))
+}
+
+fn make-gradient(grad: (Float -> (Int, Int, Int))) -> (Float -> String) {
+    return fn (t) {
+        let (r, g, b) = grad(t.clamp(0.0, 1.0))
+        "#{r:02x}{g:02x}{b:02x}"
+    }
+}
+
+pub fn hsl-gradient(
+    c1: (Float, Float, Float),
+    c2: (Float, Float, Float)
+) -> (Float -> String) {
+    let (h1, s1, l1) = c1
+    let (h2, s2, l2) = c2
+    make-gradient(
+        t -> hsl-to-rgb(
+            h1 + (h2 - h1) * t,
+            s1 + (s2 - s1) * t,
+            l1 + (l2 - l1) * t
+        )
+    )
+}
+
+pub fn rgb-gradient(
+    c1: (Int, Int, Int),
+    c2: (Int, Int, Int)
+) -> (Float -> String) {
+    let (r1, g1, b1) = c1
+    let (r2, g2, b2) = c2
+    make-gradient(
+        t -> (
+            iround(r1 + (r2 - r1) * t),
+            iround(g1 + (g2 - g1) * t),
+            iround(b1 + (b2 - b1) * t)
+        )
+    )
+}
+
+pub fn rgb-gradient(
+    c1: String,
+    c2: String
+) -> (Float -> String) {
+    match (c1, c2) {
+        (RGB(c1), RGB(c2))
+            => rgb-gradient(c1, c2),
+        else
+            => throw ValueError("invalid RGB color(s) for gradient: '{c1}', '{c2}'")
+    }
+}
+
+pub __tls::chalk = Chalk()

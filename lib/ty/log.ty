@@ -1,0 +1,215 @@
+import ty
+import ty.parse as parse
+import ty.token (next)
+import os (..)
+import time
+import chalk
+import io
+
+pub const CRITICAL = 0
+pub const ERROR    = 1
+pub const WARN     = 2
+pub const INFO     = 3
+pub const DEBUG    = 4
+
+use LoggingConfig = {
+    ?level: ?Int,
+    ?path:  ?String
+}
+
+let levels = %{
+    CRITICAL: 'critical',
+    ERROR: 'error',
+    WARN: 'warn',
+    INFO: 'info',
+    DEBUG: 'debug'
+}
+
+fn log-open(path: String) {
+    open(path, O_RDWR | O_TRUNC | O_CREAT, 0644)
+}
+
+let global-log-fds  = %{nil: 2, *: log-open(it)}
+let global-log-conf = %{}
+let global-log-lock = Mutex()
+
+pub DEFAULT_LOG_PATH = getenv('TY_LOG')
+
+pub class Logger {
+    __name:   String
+    __chalk:  chalk.Chalk
+    __prefix: (Int, Bool) -> _
+    __stack:  Array[String]
+    __indent: Int
+    __level:  Int
+    __color:  Bool
+    __path:   String | nil
+
+    init(name: String, path: ?String, chalk: chalk::Chalk = chalk::Chalk()) {
+        __name = name
+        __indent = 4
+        __level = WARN
+        __stack = []
+        __chalk = chalk
+        __prefix = fn (level, color) {
+            let t = time.utime()
+
+            let whole = time.strftime('%Y-%m-%d %H:%M:%S', t / 1000000)
+            let frac  = "{(t % 1000000) / 1000:03}"
+            let time-str = "{whole}.{frac}"
+
+            let threadName = (Thread.getName() ?? "T{Thread.id()}")
+            let levelName = "{"[{levels[level]}]":10}"
+
+            if color {
+                __chalk"[time]{time-str}[/] "
+                    "[{levels[level]}]{levelName}[/] "
+                    "[thread{Thread.id()}?]{"[{threadName}]":8}[/]"
+            } else {
+                "{time-str} {levelName} {"[{threadName}]":8}"
+            }
+        }
+
+        __chalk.critical = 'bright red bold underline'
+        __chalk.error    = 'bright red'
+        __chalk.warn     = 'bright yellow'
+        __chalk.info     = '#4989eb'
+        __chalk.debug    = '#ff45be'
+        __chalk.time     = '#10ccb9'
+        __chalk.name     = '#92e83c'
+
+        setup({path})
+    }
+
+    setup(config: LoggingConfig) {
+        __path  = config.?path  ?? __path
+        __level = config.?level ?? __level
+
+        with global-log-lock {
+            __color = isatty(global-log-fds[__path])
+        }
+    }
+
+    setLevel(level) {
+        __level = level
+    }
+
+    setPrefix(f) {
+        __prefix = f
+    }
+
+    log(level, msg) {
+        if __level >= level {
+            let name = if #__stack == 0 {
+                __name
+            } else {
+                "{__name}[{__stack.join('.')}]"
+            }
+
+            let out = if __color {
+                __chalk"{(__prefix)(level, true)} [name]{name}[/]: {msg}\n"
+            } else {
+                "{(__prefix)(level, false)} {name}: {msg}\n"
+            }
+
+            with global-log-lock {
+                let fd = global-log-fds[__path]
+                write(fd, "{out}")
+            }
+        }
+    }
+
+    warn(msg) {
+        log(WARN, msg)
+    }
+
+    error(msg) {
+        log(ERROR, msg)
+    }
+
+    info(msg) {
+        log(INFO, msg)
+    }
+
+    critical(msg) {
+        log(CRITICAL, msg)
+    }
+
+    debug(msg) {
+        log(DEBUG, msg)
+    }
+
+    push(name) {
+        __stack.push(name)
+    }
+
+    pop() {
+        __stack.pop()
+    }
+}
+
+class LogContextGuard {
+    __logger: Logger
+
+    init(logger: Logger, name: String) {
+        __logger = logger
+        __logger.push(name)
+    }
+
+    __drop__() {
+        __logger.pop()
+    }
+}
+
+let __tls::_loggers = nil
+let __tls::_chalk   = nil
+
+fn _conf(name: String) {
+    with global-log-lock {
+        global-log-conf[name]
+    }
+}
+
+fn _get(name: String, path: ?String) -> Logger {
+    let loggers = _loggers ?? (_loggers = %{})
+    let chalk   = _chalk   ?? (_chalk = chalk.Chalk())
+    if let $logger = loggers[name] {
+        logger
+    } else {
+        let logger = Logger(name, path, chalk)
+        if let $conf = _conf(name) {
+            logger.setup(conf)
+        }
+        loggers[name] = logger
+        logger
+    }
+}
+
+fn _log(level, expr) $$[
+    $${_get}(__module__, $$::(DEFAULT_LOG_PATH)).log($${level}, $$expr)
+$$]
+
+fn _ctx(name) $$[
+    let ^_ = $$::(LogContextGuard)(
+        $${_get}(__module__, $$::(DEFAULT_LOG_PATH)),
+        $$name
+    )
+$$]
+
+pub macro    debug!(expr) { _log(DEBUG,    expr) }
+pub macro     info!(expr) { _log(INFO,     expr) }
+pub macro     warn!(expr) { _log(WARN,     expr) }
+pub macro    error!(expr) { _log(ERROR,    expr) }
+pub macro critical!(expr) { _log(CRITICAL, expr) }
+
+pub macro log-ctx(name) { _ctx(name) }
+
+pub macro logging(config) = do {
+    let config = $$config
+    let logger = $${_get}(__module__, $$::(DEFAULT_LOG_PATH))
+    logger.setup(config)
+    $$::(global-log-lock).lock()
+    $$::(global-log-conf)[__module__] = config
+    $$::(global-log-lock).unlock()
+}
+

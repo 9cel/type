@@ -1,0 +1,13 @@
+import ty
+
+pub fn walk(tree, f) {
+    __walk!(tree, f)
+}
+
+pub fn Pair(left, right) {
+    ty.Record([
+        ty.RecordEntry({item: left}),
+        ty.RecordEntry({item: right})
+    ])
+}
+

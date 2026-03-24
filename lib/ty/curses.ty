@@ -1,0 +1,129 @@
+import ffi as c (wrap, C!)
+
+if not let $curses = c.open(
+    [
+        'ncursesw',
+        'ncurses',
+        'pdcursesw',
+        'pdcurses',
+        'cursesw',
+        'curses'
+    ],
+    [nil, 5, 6]
+) {
+	throw RuntimeError('failed to load curses')
+}
+
+enum! {
+    KEY_DOWN = 258,
+    KEY_UP,
+    KEY_LEFT,
+    KEY_RIGHT
+}
+
+let KEY_BACKSPACE = 263
+
+C! pub curses fn {
+    int start_color()
+    int use_default_colors()
+    int init_pair(c.short, c.short, c.short)
+    int init_color(c.short, c.short, c.short, c.short)
+    int COLOR_PAIR(c.int)
+    int wcolor_set(c.ptr, c.short, c.ptr)
+    int color_set(c.short, c.ptr)
+    WINDOW *newwin(c.int, c.int, c.int, c.int)
+    WINDOW *subwin(c.ptr, c.int, c.int, c.int, c.int)
+    int delwin(c.ptr)
+    int endwin()
+    int mvwin(c.ptr, c.int, c.int)
+    void wsyncup(c.ptr)
+    void wsyncdown(c.ptr)
+    WINDOW *newpad(c.int, c.int)
+    int prefresh(c.ptr, c.int, c.int, c.int, c.int, c.int, c.int)
+    unsigned long mousemask(c.u32, c.ptr)
+    int whline(c.ptr, c.int, c.int)
+    void wbkgdset(c.ptr, c.int)
+    int wresize(c.ptr, c.int, c.int)
+    int box(c.ptr, c.int, c.int)
+    int refresh()
+    int wrefresh(c.ptr)
+    int wclear(c.ptr)
+    int erase()
+    int werase(c.ptr)
+    int getch()
+    int curs_set(c.int)
+    int move(c.int, c.int)
+    int wmove(c.ptr, c.int, c.int)
+    int echo()
+    int noecho()
+    int cbreak()
+    int nocbreak()
+    int raw()
+    int noraw()
+    int keypad(c.ptr, c.u8)
+    int clrtoeol()
+    int wclrtoeol(c.ptr)
+    int clearok(c.ptr, c.u8)
+    int scrollok(c.ptr, c.u8)
+    void immedok(c.ptr, c.u8)
+    int idlok(c.ptr, c.u8)
+    int wsetscrreg(c.ptr, c.int, c.int)
+    SCREEN *newterm(c.ptr, c.ptr, c.ptr)
+}
+
+ns raw {
+    C! pub curses fn {
+        WINDOW *initscr()
+        int mvaddnstr(c.int, c.int, c.ptr, c.int)
+        int mvwaddnstr(c.ptr, c.int, c.int, c.ptr, c.int)
+        int waddnstr(c.ptr, c.ptr, c.int)
+        int getmaxx(c.ptr)
+        int getmaxy(c.ptr)
+        int getcurx(c.ptr)
+        int getcury(c.ptr)
+        int getparx(c.ptr)
+        int getpary(c.ptr)
+    }
+}
+
+pub stdscr = nil
+
+let s = c.new(c.ptr)
+let n = c.new(c.int)
+
+let x = c.new(c.int)
+let y = c.new(c.int)
+
+pub initscr = () -> (stdscr = raw.initscr())
+
+pub fn getmaxyx(win = stdscr) {
+	(raw.getmaxy(win), raw.getmaxx(win))
+}
+
+pub fn getparyx(win = stdscr) {
+	(raw.getpary(win), raw.getparx(win))
+}
+
+pub fn getyx(win = stdscr) {
+    (raw.getcury(win), raw.getcurx(win))
+}
+
+pub fn mvaddstr(i, j, msg: Blob | String) {
+	raw.mvaddnstr(i, j, msg, msg.size())
+}
+
+pub fn mvwaddstr(w, i, j, msg: Blob | String) {
+	raw.mvwaddnstr(w, i, j, msg, msg.size())
+}
+
+pub fn waddstr(w, msg: Blob | String) {
+    raw.waddnstr(w, msg, msg.size())
+}
+
+pub fn addnstr(msg: Blob | String, n) {
+    raw.waddnstr(stdscr, msg, n)
+}
+
+pub fn addstr(msg: Blob | String) {
+    raw.waddnstr(stdscr, msg, msg.size())
+}

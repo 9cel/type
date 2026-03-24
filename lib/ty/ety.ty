@@ -1,0 +1,104 @@
+import ty
+
+tag Code, Text, Expr, Embed, IfDef;
+
+use TemplateToken =
+    Code[String]
+  | Text[String]
+  | Expr[String]
+  | Embed[String]
+  | IfDef[(String, String)]
+
+const TAG = /([\s\S]*?)<%([=@]|\?\w+)?((?:(?!%>).)+)%>/
+
+fn tokenize(s: String) -> Array[TemplateToken] {
+    let tokens = []
+
+    while let [`#` ~> n, text, kind, body] = s.match(TAG) {
+        s += n
+        if kind == '=' {
+            tokens.push(Text(text))
+            tokens.push(Expr(body))
+        } else {
+            tokens.push(Text(text.comb(/^[ \t]*\z/)))
+            if kind == '@' {
+                tokens.push(Embed(body))
+            } else if let [_, v] = (kind ?? '').match(/^\?(\w+)/) {
+                tokens.push(IfDef(v, body))
+            } else {
+                tokens.push(Code(body))
+            }
+            s = s.comb(/^[ \t]*\n/)
+        }
+    }
+
+    if s {
+        tokens.push(Text(s))
+    }
+
+    tokens
+}
+
+fn generate-code(tokens: Array[TemplateToken]) -> String {
+    let chunks = []
+    let string = []
+
+    fn flush-string() {
+        if #string > 0 {
+            chunks.push("_ety_push(\"{string.join()}\");\n")
+            string = []
+        }
+    }
+
+    for match tokens {
+       Text(s) => do {
+            string.push(
+                s.sub(/[\\"{}\n\t]/, match {
+                    '\n' => '\\n',
+                    '\t' => '\\t',
+                    ch   => "\\{ch}",
+                 })
+            )
+        },
+
+        Code(src) => do {
+            flush-string()
+            chunks.push("{src}\n")
+        },
+
+        Expr(expr) =>
+            string.push("\{{expr}\}"),
+
+        Embed(path) => do {
+            flush-string()
+            let source = slurp(path.strip())
+            let tokens = tokenize(source)
+            chunks.push(generate-code(tokens))
+        },
+
+        IfDef(v, s) => do {
+            flush-string()
+            chunks.push("ifdef {v} {s}")
+        }
+    }
+
+    flush-string()
+
+    chunks.join()
+}
+
+pub fn compile(source, vars) -> _ {
+    let body = generate-code(tokenize(source))
+    let params = ["{v}: _" for v in vars].join(', ')
+    let prog = (
+        "(
+       \>  fn ({params}) \{
+       \>    let _ety_blob = ::blob();
+       \>    let _ety_push = _ety_blob.push;
+       \>    {body};
+       \>    _ety_blob.str!()
+       \>  \}
+       \>)"
+    )
+    __eval__(prog)
+}

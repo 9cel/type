@@ -1,0 +1,274 @@
+pub import sqlite3c (..)
+import pretty
+
+fn sqlite3c::open(path: String, flags: ?Int) -> _;
+
+pub class SQLiteError < RuntimeError {
+    code: Int
+
+    init(code: Int, ctx: String = '') {
+        self.code = code
+        let msg = ::errorMessage(code)
+        super((ctx == '') ? msg : "{ctx}: {msg}")
+    }
+}
+
+class SQLiteRowIter[a] : Iter[a] {
+    __stmt: SQLiteStatement[a]
+    __assoc: Bool
+
+    init(stmt, assoc=true) {
+        __stmt = stmt
+        __assoc = assoc
+    }
+
+    __next__() {
+        Some.from(
+            __stmt.nextRow(__assoc)
+        )
+    }
+}
+
+class SQLiteStatement[a] : Iterable[a] {
+    __p: _
+    __status: Int
+
+    init(p: _) {
+        __p = p
+    }
+
+    exec() -> Int {
+        if __p {
+            __status = ::step(__p)
+            ::finalize(__p)
+            __p = nil
+            if __status != SQLITE_DONE && __status != SQLITE_ROW {
+                throw SQLiteError(__status)
+            }
+            return __status
+        } else {
+            throw SQLiteError(SQLITE_MISUSE)
+        }
+    }
+
+    step() -> Int {
+        if __p {
+            return (__status = ::step(__p))
+        } else {
+            throw SQLiteError(SQLITE_MISUSE)
+        }
+    }
+
+    row(assoc=true) -> a | nil {
+        if __p {
+            if __status == SQLITE_ROW {
+                return assoc ? cast(fetchAssoc(__p)) : cast(fetch(__p))
+            } else {
+                return nil
+            }
+        } else {
+            throw SQLiteError(SQLITE_MISUSE)
+        }
+    }
+
+    nextRow(assoc=true) -> a | nil {
+        step()
+        let row = row(assoc)
+        if __status == SQLITE_DONE {
+            finalize()
+        }
+        row
+    }
+
+    finalize() -> nil {
+        if __p {
+            __status = ::finalize(__p)
+            __p = nil
+            if __status != SQLITE_OK {
+                throw SQLiteError(__status)
+            }
+        }
+    }
+
+    rows(assoc=true) -> SQLiteRowIter[a] {
+        if !__p {
+            throw SQLiteError(SQLITE_MISUSE)
+        }
+        ::reset(__p)
+        return SQLiteRowIter(self, assoc)
+    }
+
+    __drop__() {
+        finalize()
+    }
+
+    __iter__() {
+        rows()
+    }
+}
+
+pub class SQLite {
+    __path: String | nil
+    __db: _
+
+    init(path: String, full-mutex: Bool = false) {
+        let flags = SQLITE_OPEN_FULLMUTEX
+                  | SQLITE_OPEN_READWRITE
+                  | SQLITE_OPEN_CREATE
+
+        if let $db = open(path, flags if full-mutex) {
+            __db = db
+            __path = path
+        } else {
+            throw SQLiteError(error(), path)
+        }
+    }
+
+    path -> String | nil { __path }
+
+    close() {
+        if __db {
+            ::close(__db)
+            __db = nil
+        }
+    }
+
+    __drop__() {
+        close()
+    }
+
+    fetchOne[a](*args, assoc=true) -> a | nil {
+        with q = query(*args) {
+            if let $row = q.nextRow(assoc=assoc) {
+                cast(row)
+            }
+        }
+    }
+
+    fetchAll[a](*args, assoc=true) -> [a] {
+        let xs = []
+
+        with q = query(*args) {
+            while let $row = q.nextRow(assoc=assoc) {
+                xs.push(row)
+            }
+        }
+
+        xs
+    }
+
+    query[a](sql, *ps) -> SQLiteStatement[a] {
+        if not let $s = ::prepare(__db, sql) {
+            throw SQLiteError(error(__db), sql)
+        }
+
+        for p, i in ps {
+            match ::bind(s, i + 1, p) {
+                ::SQLITE_OK => {},
+                  e         => throw SQLiteError(e)
+            }
+        }
+
+        return SQLiteStatement(s)
+    }
+
+    exec(sql, *ps) -> Int {
+        self.query(sql, *ps).exec()
+    }
+
+    run(sql: String) {
+        for stmt in sql.split(';') {
+            let stmt = stmt.trim()
+            if stmt != '' {
+                exec(stmt)
+            }
+        }
+    }
+
+    changes() -> Int {
+        ::changes(__db)
+    }
+
+    total-changes() -> Int {
+        ::totalChanges(__db)
+    }
+
+    last-insert-rowid() -> Int {
+        ::lastInsertRowid(__db)
+    }
+
+    error-message() -> String {
+        ::errorMessage(__db)
+    }
+
+    transaction(f: () -> _) {
+        exec('BEGIN')
+        try {
+            let result = f()
+            exec('COMMIT')
+            result
+        } catch e {
+            exec('ROLLBACK')
+            throw e
+        }
+    }
+
+    table?(name: String) -> Bool {
+        let row = fetchOne(
+            'SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?',
+            'table', name
+        )
+        row != nil
+    }
+
+    tables() -> Array[String] {
+        fetchAll(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+            assoc=false
+        ).map(&0)
+    }
+
+    dialect -> String { 'sqlite' }
+
+    placeholder(n: Int) -> String { '?' }
+
+    auto-pk-type -> String { 'INTEGER PRIMARY KEY AUTOINCREMENT' }
+
+    existing-columns(table: String) {
+        let rows: _ = fetchAll(
+            "PRAGMA table_info({table})",
+            assoc=true
+        )
+        let by-name = %{}
+        for r in rows {
+            by-name[r['name']] = {
+                type: r['type'],
+                notnull: r['notnull'] == 1,
+                dflt: r['dflt_value'],
+                pk: r['pk'] == 1
+            }
+        }
+        by-name
+    }
+
+    insert-returning(
+        sql: String,
+        cols: String,
+        *ps
+    ) -> Int {
+        exec(sql, *ps)
+        last-insert-rowid()
+    }
+
+    __repr__() -> String {
+        if __path {
+            "SQLite({__path})"
+        } else {
+            "SQLite(:memory:)"
+        }
+    }
+
+    __str__() -> String {
+        __repr__()
+    }
+}

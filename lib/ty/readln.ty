@@ -1,0 +1,969 @@
+import term (TermIO)
+import errno
+import ffi as c (C!)
+import os (..)
+import sh (sh)
+import ioctls (..)
+import json
+import time
+import chalk (chalk)
+import path (Path)
+
+let ERASE_LINE = "\x1b[2K"
+let ERASE_REST = "\x1b[0J"
+
+let __tls::reader: ?InteractiveLineReader = nil
+
+pub tag CycleCompletions, ListCompletions, ReplaceLine, Insert;
+
+use Text = String | chalk::Text
+
+pub use CompletionLabel = Text | Array[Text | nil]
+
+pub use CompletionItem = String | (CompletionLabel, String);
+
+pub use CompletionAction = CycleCompletions[Array[CompletionItem]]
+                         | ListCompletions[Array[CompletionItem]]
+                         | Insert[String]
+                         | ReplaceLine[String]
+                         | None
+
+pub use CompletionFunction = {before: String, after: String} -> CompletionAction;
+
+pub use Prompt = Text | (() -> Text)
+
+pub use RenderFunction = {
+    prompt: Text,
+    lines: Array[Array[String]],
+    line: Int,
+    col: Int
+} -> (Array[String], Int, Int);
+
+use HistoryEntry = {
+    lines: Array[Array[String]],
+    i: Int,
+    j: Int,
+    t: Float
+};
+
+fn completion-label(item: CompletionItem) -> CompletionLabel {
+    (item :: String) ? item : item.0
+}
+
+fn completion-label-plain(item: CompletionItem) -> String {
+    let label = completion-label(item)
+
+    let label = match label {
+        parts: Array[Text | nil]
+            => parts.remove(nil).join(),
+        part
+            => str(part)
+    }
+
+    (chalk"{label}").plain
+}
+
+fn completion-text(item: CompletionItem) -> String {
+    match item {
+        (_, s) => s,
+        s      => s
+    }
+}
+
+class CompletionCycler {
+    __line:   Array[String]
+    __i:      Int
+    __cs:     Array[CompletionItem]
+    __ci:     Int
+    __first:  Bool
+    __pages:  Array[Array[Array[String]]]
+    __limits: {rows: Int, cols: Int}
+
+    init(cs: Array[CompletionItem], line: Array[String], i: Int) {
+        __i = i
+        __line = line
+        __cs = cs
+        __ci = 0
+        __first = true
+        __pages = []
+        __limits = terminal-size()!
+
+        let rows = fit-items(__cs.map(completion-label), __limits.cols)
+        let max-height = (__limits.rows - 8).clamp(1, 32)
+
+        while rows {
+            let page = []
+            let height = 0
+
+            while rows and (height < max-height) {
+                let row = rows.pop(0)
+                let width = __join(row).width()
+                height += 1 + (width / (__limits.cols + 1))
+                page.push(row)
+            }
+
+            __pages.push(page)
+        }
+    }
+
+    static __join(row: Array[String]) -> String {
+        row.join("\x1b[0m    ")
+    }
+
+    __seek(ci: Int) -> (Int, Int) {
+        let n = 0
+
+        for page, i in __pages {
+            let count = page.map(`#`).sum()
+            if ci < n + count {
+                return (i, n)
+            }
+            n += count
+        }
+
+        unreachable!
+    }
+
+    items -> Array[CompletionItem] {
+        __cs
+    }
+
+    cycle() -> (Array[String], Int) {
+        if __ci == #__cs {
+            __ci = 0
+            return (__line, __i)
+        }
+
+        let text = completion-text(__cs[__ci])
+        let line = __line.clone()
+        line.insert(__i, text)
+
+        __ci += 1
+
+        (line, __i + 1)
+    }
+
+    render() {
+        let out = Blob("{ERASE_REST}\n")
+
+        let ci = (__ci % #__cs)
+        let (pg-num, pg-start) = __seek(ci)
+
+        let page = __pages[pg-num]
+
+        let i = (ci - pg-start) % #page
+        let j = (ci - pg-start) / #page
+
+        let off = 0
+
+        for row, row-i in page {
+            if (i == row-i) && (__ci < #__cs) {
+                row = [*row]
+                row[j] = str(chalk"[reverse]{row[j]}[/]")
+            }
+
+            let line = row.join("\x1b[0m    ")
+
+            off += line.width() / (__limits.cols + 1)
+
+            out.push("{line}\n")
+        }
+
+        if #__pages > 1 {
+            out.push("\nPage {pg-num + 1} of {#__pages}\n")
+            off += 2
+        }
+
+        out.push("\r\x1b[{#page + off + 1}A")
+        out.str!()
+    }
+
+    cursor -> Int {
+        (__ci + 1) % #__cs
+    }
+}
+
+fn complete-file(before: String, after: String) -> CompletionAction {
+    let path-prefix = (before.match(/'[^']*$/) ?? before.match(/\S*$/))!
+    let parts = path-prefix.comb(/'/).split('/')
+
+    let (dir, prefix) = match parts {
+        [prefix] => ('.', prefix),
+        [*parts, prefix] => (parts.join('/'), prefix)
+    }
+
+    if not let $output = sh("find -s '{dir}' -maxdepth 1 -name '{prefix}*'") {
+        return None
+    }
+
+    let names: Array[String] = output
+        .lines()
+        .filter(${#it > 0})
+        .map!(&comb(/^\.\//))
+
+    let chop = &slice(#"{dir}/{prefix}".comb(/^\.\//))
+
+    match names {
+        []       => None,
+        [unique] => Insert(chop(unique)),
+        _        => CycleCompletions(names.map(chop))
+    }
+}
+
+fn fit-items(items: Array[CompletionLabel], W: Int) -> Array[Array[String]] {
+    fn width(text: Text | nil) -> Int {
+        (text == nil) ? 0 : "{text}".width()
+    }
+
+    fn group-cols(n: Int) -> Array[Array[CompletionLabel]] {
+        items.groups-of((#items + n - 1) / n)
+    }
+
+    fn widths(ncol: Int) -> Array[Array[Int]] {
+        let cols = group-cols(ncol)
+
+        fn col-widths(i: Int) -> Array[Int] {
+            if i >= #cols {
+                return []
+            }
+
+            let nparts = cols[i]
+                .map(label -> (label :: Array) ? #label : 1)
+                .max()
+
+            let parts: Array[Int] = []
+
+            fn limit() -> Int {
+                W - (parts.sum() ?? 0)
+            }
+
+            let max-singleton = 0
+
+            for j in ..nparts {
+                let w = cols[i].map(match {
+                    (label: Array[Text | nil]) and (#label > j)
+                        => min(limit(), width(label[j])),
+
+                    label and (j == 0) => do {
+                        max-singleton = max(
+                            max-singleton,
+                            min(limit(), width(label))
+                        )
+
+                        0
+                    },
+
+                    _ => 0
+                }).max() as Int
+                parts.push(w || max-singleton)
+            }
+
+            parts
+        }
+
+        [col-widths(it) for ..ncol]
+    }
+
+    let (ncol, ws) = (
+        for ncol in 1..#items {
+            let ws = widths(ncol + 1)
+            if ws.flat().sum(0) + 6 * ncol > W {
+                break (ncol, widths(ncol))
+            }
+        }
+    ) ?? (#items, widths(#items))
+
+    let cols: [[CompletionLabel]] = group-cols(ncol)
+    let nrow = cols.map(&len).max() as Int
+
+    fn s(x: Text | nil) -> String {
+        match x {
+            x: String => x,
+            nil       => '',
+            _         => "{x}"
+        }
+    }
+
+    fn format(label: CompletionLabel, widths: Array[Int]) -> String {
+        match label {
+            parts: Array[Text | nil] => [
+                "{s(parts[i]):<{widths[i]}}"
+                for i in ..#parts
+            ].str() ?? '',
+
+            part => "{s(part):<{widths.sum()}}"
+        }
+    }
+
+    let x = cols.map(c -> (#c > 0) ? c[0] : '').zip(ws, f=format)
+
+    return [
+        cols.map(c -> (#c > i) ? c[i] : '').zip(ws, f=format)
+        for i in ..nrow
+    ]
+}
+
+pub class InteractiveLineReader {
+    __tio: TermIO
+    __pty: os.PTY | nil
+    __borrowed-tio?: Bool
+    __history-file: Path | nil
+    __history: Array[HistoryEntry]
+    __prompt: Prompt
+    __complete: CompletionFunction | nil
+    __render: RenderFunction
+    __kill-ring: Array[Array[String]]
+
+    init(
+        term: Int | TermIO | os.PTY = 0,
+        prompt=nil,
+        complete=nil,
+        ctrl-c: ?Bool = false,
+        history-file: Path | String | nil = nil,
+        render: RenderFunction | nil = nil,
+    ) {
+        match term {
+            tio: TermIO => {
+                __tio = tio
+                __borrowed-tio? = true
+            },
+            fd: Int => {
+                __tio = TermIO(fd, mouse=false)
+                __borrowed-tio? = false
+            },
+            pty: os.PTY => {
+                __pty = pty
+                __tio = TermIO(pty.slave, mouse=false)
+                __borrowed-tio? = false
+            }
+        }
+
+        __prompt = prompt ?? '>> '
+        __complete = complete
+        __history-file = (history-file != nil) ?: Path(history-file)
+
+        if history-file != nil and let $raw = slurp("{history-file}") {
+            __history = raw.lines().map(json::parse!)
+        } else {
+            __history = []
+        }
+
+        __kill-ring = []
+
+        __render = render ?? fn (
+            prompt: Text,
+            lines: Array[Array[String]],
+            line: Int,
+            col: Int
+        ) -> (Array[String], Int, Int) {
+            (lines.map(\_.str() ?? ''), line, col)
+        }
+    }
+
+    __add-history(lines: Array[Array[String]], i: Int, j: Int) {
+        let entry = {lines, i, j, t: time.utc()}
+
+        if __history-file != nil {
+            __history-file.parent.mkdir(parents=true, exist-ok=true)
+            __history-file.append("{json::encode(entry)}\n")
+        }
+
+        __history.push(entry)
+    }
+
+    _get-prompt() -> Text {
+        (__prompt :: Function) ? __prompt() : __prompt
+    }
+
+    readln(
+        prompt: Text | nil = nil,
+        complete: _ = nil,
+        erase: Bool = false,
+        keybinds: Dict[String, _] = %{},
+        render: RenderFunction | nil = nil
+    ) -> String | nil {
+        if __tio == nil {
+            init()
+        }
+
+        let prompt = str(prompt ?? _get-prompt())
+        let render = render ?? __render
+
+        let lines: Array[Array[String]] = [[]]
+        let nr: Int = 0
+
+        let line: Array[String] = []
+        let i: Int = 0
+
+        fn get-before() {
+            line.slice(0, i).str() ?? ''
+        }
+
+        fn get-after() {
+            line.slice(i).str() ?? ''
+        }
+
+        fn get-text() {
+            lines.map(\_.str() ?? '').unlines()
+        }
+
+        fn print-items(cs, select: Int = nil) {
+            write(__tio.fd, "{ERASE_LINE}\rAvailable completions:\n")
+
+            let (h, w) = __tio.size()
+
+            let n = 0
+            for row in fit-items(cs, w) {
+                if select in n.range(0, #row - 1) {
+                    row[select - n] = chalk"[reverse]{row[select - n]}[/]"
+                }
+                print(row.join('    '))
+                n += #row
+            }
+        }
+
+        fn draw(start: Int, count: Int) {
+            let i = line[;i].map(&width).sum() ?? 0
+            let lines = [(it.str() ?? '').chars() for lines]
+
+            let (lines, line, col) = render(prompt, lines, nr, i)
+
+            let out = Blob()
+            let pad = "{'':.<{prompt.width()}}"
+
+            if start > 0 {
+                out.push("\r\x1b[{start}A")
+            }
+
+            if count > #lines {
+                for ..count {
+                    out.push("\r{ERASE_LINE}\n")
+                }
+                out.push("\x1b[{count}A")
+            }
+
+            for text, i in lines {
+                if i > 0 {
+                    out.push('\n')
+                }
+                out.push("\r{ERASE_LINE}")
+                out.push("{(i == 0) ? prompt : pad}{text}")
+            }
+
+            let up = (#lines - line - 1)
+            if up > 0 {
+                out.push("\x1b[{up}A")
+            }
+
+            out.push("\x1b[{1 + col + prompt.width()}G")
+
+            write(__tio.fd, out.str!())
+        }
+
+        __tio.start()
+        defer __tio.stop()
+
+        let hi = 0
+        let h-prefix = nil
+        let h-suffix = nil
+
+        let completion-cycler = nil
+        let last-yank-pos = nil
+
+        fn kill(chars: Array[String]) {
+            if chars { __kill-ring.push(chars) }
+        }
+
+        fn h-match?(i) {
+            if #__history < i { return false }
+            let text = __history[-i].0.str() ?? ''
+            return (
+                (h-prefix == nil || text.starts?(h-prefix))
+             && (h-suffix == nil || text.ends?(h-suffix))
+            )
+        }
+
+        fn skip-l(pattern: Regex) {
+            while i > 0 && line[i - 1].match?(pattern) {
+                i -= 1
+            }
+        }
+
+        fn skip-r(pattern: Regex) {
+            while i < #line && line[i].match?(pattern) {
+                i += 1
+            }
+        }
+
+        draw(0, 0)
+
+        while true {
+            let nr0 = nr
+            let count0 = #lines
+
+            let before = line.slice(0, i).str() ?? ''
+            let all = line.str() ?? ''
+
+            if not let $ev = __tio.next-event() {
+                continue
+            }
+
+            if ev == term.event.EOF {
+                return nil
+            }
+
+            let key = match ev {
+                term.event.Text(_) as t
+                    => t,
+
+                term.event.Key({event: 1 or 2, *}) as key
+                    => "<{key.nice-name()}>",
+                _
+                    => do continue
+            }
+
+            if (key :: String) and let $func = keybinds[key] {
+                func(*__tio.size())
+            }
+
+            let hi-start = hi
+
+            if (key != '<Tab>') && (completion-cycler != nil) {
+                write(__tio.fd, ERASE_REST)
+                completion-cycler = nil
+            }
+
+            let no-op = false
+
+            match key {
+                '<Enter>', '\n' => {
+                    let text = get-text()
+
+                    if text != '' && (__history == [] || (line, i) != __history[-1]) {
+                        __add-history(lines, nr, i)
+                    }
+
+                    if erase {
+                        write(__tio.fd, "{ERASE_LINE}\r")
+                    } else {
+                        write(__tio.fd, '\n')
+                    }
+
+                    return text
+                },
+
+                '<C-Enter>',
+                '<S-Enter>' => {
+                    let (before, after) = line.split(i)
+                    lines[nr] = before
+                    lines.insert(++nr, after)
+                    line = lines[nr]
+                    i = 0
+                },
+
+                '<C-d>' => {
+                    if erase {
+                        write(__tio.fd, "{ERASE_LINE}\r")
+                    } else {
+                        write(__tio.fd, '\n')
+                    }
+                    return nil
+                },
+
+                '<C-a>',
+                '<Home>' => {
+                    i = 0
+                },
+
+                '<C-e>',
+                '<End>' => {
+                    i = #line
+                },
+
+                '<C-k>' => {
+                    kill(line.splice(i, #line - i))
+                },
+
+                '<C-l>' => {
+                    write(__tio.fd, "\x1b[2J\x1b[H")
+                },
+
+                '<C-p>' => {
+                    nr = max(nr - 1, 0)
+                    line = lines[nr]
+                    i = min(i, #line)
+                },
+
+                '<C-n>' => {
+                    nr = min(nr + 1, #lines - 1)
+                    line = lines[nr]
+                    i = min(i, #line)
+                },
+
+                '<C-w>',
+                '<M-Backspace>' => {
+                    let end = i
+                    skip-l(/^\s$/)
+                    skip-l(/^\S$/)
+                    kill(line.splice(i, end - i))
+                },
+
+                '<C-h>' => {
+                    if i > 0 {
+                        line.pop(--i)
+                    }
+                },
+
+                '<C-t>' => {
+                    if #line >= 2 && i > 0 {
+                        let j = min(i, #line - 1)
+                        let tmp = line[j - 1]
+                        line[j - 1] = line[j]
+                        line[j] = tmp
+                        i = j + 1
+                    }
+                },
+
+                '<C-u>' => {
+                    kill(line.splice(0, i))
+                    i = 0
+                },
+
+                '<C-y>' => if __kill-ring {
+                    let chars = __kill-ring[-1]
+                    line.insert(i, *chars)
+                    last-yank-pos = (i, i + #chars)
+                    i += #chars
+                },
+
+                '<M-y>' => if let (start, end) = last-yank-pos and #__kill-ring > 1 {
+                    line.splice(start, end - start)
+                    __kill-ring.insert(0, __kill-ring.pop())
+                    let chars = __kill-ring[-1]
+                    line.insert(start, *chars)
+                    last-yank-pos = (start, start + #chars)
+                    i = start + #chars
+                },
+
+                '<M-d>' => {
+                    let start = i
+                    skip-r(/^\s$/)
+                    skip-r(/^\S$/)
+                    kill(line.splice(start, i - start))
+                    i = start
+                },
+
+                '<M-u>' => {
+                    skip-r(/^\s$/)
+                    while i < #line && line[i].match?(/^\S$/) {
+                        line[i] = line[i].upper()
+                        i += 1
+                    }
+                },
+
+                '<M-l>' => {
+                    skip-r(/^\s$/)
+                    while i < #line && line[i].match?(/^\S$/) {
+                        line[i] = line[i].lower()
+                        i += 1
+                    }
+                },
+
+                '<M-c>' => {
+                    skip-r(/^\s$/)
+                    if i < #line {
+                        line[i] = line[i].upper()
+                        i += 1
+                    }
+                    while i < #line && line[i].match?(/^\S$/) {
+                        line[i] = line[i].lower()
+                        i += 1
+                    }
+                },
+
+                '<M-t>' => {
+                    let save = i
+
+                    // Find word2 (at/after cursor)
+                    skip-r(/^\s$/)
+                    skip-r(/^\S$/)
+                    let w2e = i
+                    skip-l(/^\S$/)
+                    let w2s = i
+
+                    // Find word1 (before word2)
+                    skip-l(/^\s$/)
+                    let w1e = i
+                    skip-l(/^\S$/)
+                    let w1s = i
+
+                    if w1s < w1e && w2s < w2e && w1e <= w2s {
+                        let word1 = line.slice(w1s, w1e - w1s)
+                        let word2 = line.slice(w2s, w2e - w2s)
+                        let mid = line.slice(w1e, w2s - w1e)
+                        line = [*line.slice(0, w1s), *word2, *mid, *word1, *line.slice(w2e)]
+                        i = w1s + #word2 + #mid + #word1
+                    } else {
+                        i = save
+                    }
+                },
+
+                '<Delete>' => {
+                    if i < #line {
+                        line.pop(i)
+                    }
+                },
+
+                '<Left>',
+                '<C-b>' => {
+                    if i > 0 {
+                        i -= 1
+                    }
+                },
+
+                '<Right>',
+                '<C-f>' => {
+                    if i < #line {
+                        i += 1
+                    }
+                },
+
+                '<M-Left>',
+                '<M-b>' => {
+                    skip-l(/^\s*$/)
+                    skip-l(/^\S*$/)
+                },
+
+                '<M-Right>',
+                '<M-f>' => {
+                    skip-r(/^\s*$/)
+                    skip-r(/^\S*$/)
+                    skip-r(/^\s*$/)
+                },
+
+                '<Up>' => {
+                    h-prefix ?= get-before()
+                    h-suffix ?= get-after()
+
+                    while hi < #__history {
+                        hi += 1
+                        if h-match?(hi) {
+                            break
+                        }
+                    }
+
+                    if hi < #__history && !h-match?(hi) {
+                        hi = hi-start
+                    }
+                },
+
+                '<Down>' => {
+                    hi -= 1
+
+                    while hi > 0 && !h-match?(hi) {
+                        hi -= 1
+                    }
+
+                    if (hi < 0) || (hi > 0 && !h-match?(hi)) {
+                        hi = 0
+                    }
+                },
+
+                '<DEL>',
+                '<Backspace>',
+                '<S-Backspace>',
+                '<C-Backspace>' => {
+                    if i > 0 {
+                        line.pop(--i)
+                    } else if nr > 0 {
+                        i = #lines[nr - 1]
+                        lines[nr - 1] += line
+                        lines.pop(nr--)
+                        line = lines[nr]
+                    }
+                },
+
+                '<C-c>' => {
+                    line = []
+                    i = 0
+                    lines = [line]
+                    nr = 0
+                },
+
+                '<Tab>' => {
+                    if completion-cycler != nil {
+                        write(__tio.fd, completion-cycler.render())
+                        (line, i) = completion-cycler.cycle()
+                    } else {
+                        let (before, after) = line.split(i)
+                        let result = (
+                               complete
+                            ?? __complete
+                            ?? complete-file
+                        )(
+                            before.str() ?? '',
+                            after.str() ?? ''
+                        )
+                        match result {
+                            Insert(s) => {
+                                line.insert(i++, s)
+                            },
+
+                            ReplaceLine(s) => {
+                                line = s.chars()
+                                i = #line
+                            },
+
+                            CycleCompletions(cs) and #cs > 0 => {
+                                completion-cycler = CompletionCycler(cs, line, i)
+                                write(__tio.fd, completion-cycler.render())
+                                (line, i) = completion-cycler.cycle()
+                            },
+
+                            ListCompletions(cs) and #cs > 0 => {
+                                print-items(cs.map(completion-label))
+                            },
+
+                            _ => {}
+                        }
+                    }
+                },
+
+                '<C-r>' => {
+                    __tio.stop()
+
+                    let fzf = spawn(
+                        ['fzf', '--read0', '--tac', '--no-sort', '-q', get-text()],
+                        stdin=SPAWN_PIPE,
+                        stdout=SPAWN_PIPE,
+                        ctty=__pty if __pty != nil
+                    )
+
+                    for {lines, *} in __history {
+                        let item = Blob(lines.map(&join).unlines())
+                        item.push(0)
+                        write(fzf.stdin, item)
+                    }
+                    os.close(fzf.stdin)
+
+                    let out = read(fzf.stdout, 8192).str().strip()
+                    os.close(fzf.stdout)
+
+                    wait(fzf.pid)
+
+                    __tio.start()
+
+                    if out {
+                        lines = out.lines().map(&chars)
+                        nr = #lines - 1
+                        line = lines[nr]
+                        i = #line
+                    }
+                },
+
+                '<C-x>' => {
+                    let (fd, tmp) = mktemp()
+                    os::close(fd)
+
+                    __tio.stop()
+
+                    let editor = spawn([getenv('EDITOR') ?? 'vi', tmp])
+                    wait(editor.pid)
+
+                    __tio.start()
+
+                    let out = slurp(tmp).comb(/\r/).sub(/\n+/, ' ').trim()
+                    if #out > 0 {
+                        line = out.chars()
+                        i = #line
+                    }
+                },
+
+                term.event.Text(s) => {
+                    line.insert(i++, s)
+                },
+
+                _ => { no-op = true }
+            }
+
+            if !no-op && key != '<C-y>' && key != '<M-y>' {
+                last-yank-pos = nil
+            }
+
+            if hi != hi-start {
+                if hi == 0 {
+                    line = []
+                    i    = 0
+                    hi   = 0
+                } else {
+                    let entry = __history[-hi]
+                    lines = entry.lines.map(\_.clone())
+                    nr    = entry.i
+                    i     = entry.j
+                    line  = lines[nr]
+                }
+            } else if key != '<Up>' {
+                hi = 0
+                h-prefix = nil
+                h-suffix = nil
+            }
+
+            lines[nr] = line
+
+            draw(nr0, count0)
+        }
+    }
+
+    progress(work, prefix, width, effects=id, cleanup=false) {
+        for p in work {
+            let w = width ?? (__tio.size().1 - 8).clamp(0, 70)
+            write(__tio.fd, "\r{prefix ?? ''}{effects(progress-string(p, w))} {p * 100:.1f}%%")
+        }
+
+        if cleanup {
+            write(__tio.fd, "{ERASE_LINE}\r")
+        }
+    }
+
+    close() {
+        if !__borrowed-tio? {
+            __tio.close()
+        }
+    }
+}
+
+fn progress-string(progress: Float, width: Int) {
+    let progress = progress.clamp(0.0, 1.0)
+    let whole-width = floor(progress * width)
+    let remainder-width = (progress * width) - whole-width
+    let part-width = floor(remainder-width * 8)
+    let part-char = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'][part-width]
+
+    if width - whole-width - 1 < 0 {
+        part-char = ''
+    }
+
+    return "[{'█'.repeat(whole-width)}{part-char}{' '.repeat(width - whole-width - 1)}]"
+}
+
+pub fn progress(work, prefix, width, effects=id, cleanup=false) {
+    reader = reader ?? InteractiveLineReader()
+    reader.progress(work, prefix, width, effects=effects, cleanup=cleanup)
+}
+
+pub fn readln(
+    prompt: ?Text = nil,
+    complete: _ = nil,
+    erase: Bool = false,
+    keybinds: Dict[String, _] = %{},
+    render: RenderFunction | nil = nil
+) -> String | nil {
+    reader = reader ?? InteractiveLineReader()
+    reader.readln(
+        prompt=prompt,
+        complete=complete,
+        erase=erase,
+        keybinds=keybinds,
+        render=render
+    )
+}

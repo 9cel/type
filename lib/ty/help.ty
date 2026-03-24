@@ -1,0 +1,210 @@
+import ty
+import ty.lex as lex
+import ty.parse as parse
+import ty.token as tok
+import ty.types as types
+import os
+import chalk (chalk, Text)
+import json
+import readln (readln, InteractiveLineReader, ListCompletions, CycleCompletions)
+import path (Path)
+import time
+import ffi as c (C!)
+
+let table: Dict[_, (String, String, String)] = %{}
+
+macro doc! {
+    let (parse.show ~> name, func) = parse.stmt(0, :raw)
+    let (parse.show ~> proto, _) = parse.stmt(99, :raw)
+
+    if tok.peek().type == '->' {
+        tok.next()
+        let (parse.show ~> rt, _) = parse.stmt(0, :raw)
+        proto = "{proto} -> {rt}"
+    }
+
+    let help = tok.next().str
+
+    $$[
+        table[$$(func)] = (
+            $$(ty.String(name)),
+            $$(ty.String(proto)),
+            $$(ty.String(help))
+        )
+    $$]
+}
+
+doc! Array.sort
+(by: ?Function, cmp: ?Function, desc: ?Bool)
+'''
+    Return a copy of the array with the elements sorted
+    in ascending order.
+
+    by:
+        Sort by(xi) <=> by(xj) instead of xi <=> xj
+
+    cmp:
+        Sort by cmp(xi, xj) instead of xi <=> xj
+
+    desc:
+        When true, reverse the usual sorting order.
+'''
+
+doc! print
+(*args, sep: String = ', ', end: String = '\n', flush: Bool = false)
+'''
+    Print each argument to stdout.
+'''
+
+doc! eprint
+(*args, sep: String = ', ', end: String = '\n', flush: Bool = false)
+'''
+    Print each argument to stderr.
+'''
+
+doc! os::getaddrinfo
+(
+    hostname: String,
+    service: String | Int,
+    family: Int,
+    socktype: Int,
+    protocol: Int,
+    flags: ?Int
+) -> Ok([{family: Int, type: Int, protocol: Int, address: Blob, canonname: ?String}]) | Err(Int)
+'''
+    See getaddrinfo(3).
+
+    Example
+    -------
+
+        let addr = match getaddrinfo('www.google.com', 80, AF_INET, SOCK_STREAM, 0) {
+            Ok([a, *]) => a,
+            Err(e) => {
+                eprint("getaddrinfo(): {gai_strerror(e)}")
+                exit(1)
+            }
+        }
+'''
+
+doc! os::sendto
+(socket: Int, data: Blob | String, flags: Int, address: Blob) -> Int
+'''
+    See sendto(2).
+
+    Example
+    -------
+
+
+        let sock = socket(AF_INET, SOCK_DGRAM, 0)
+
+        let Ok([&.address ~> addr]) = getaddrinfo(...)
+
+        if sendto(sock, "Hello!", 0, addr) < 0 {
+            eprint(...)
+            return -1
+        }
+'''
+
+doc! os::recvfrom
+[
+    (socket: Int, buffer: Blob, n: Int, flags: Int) -> Int,
+    (socket: Int, n: Int, flags: Int) -> Int
+]
+'''
+    See recvfrom(2).
+
+    Example
+    -------
+
+    let b = Blob()
+
+    while recvfrom(sock, b, 4096, 0) > 0 {
+        print("Got a message: {b.str()}")
+        b.clear()
+    }
+'''
+
+doc! os::exec
+(argv: [String]) -> Int
+'''
+    See execvp(2).
+
+    Example
+    -------
+
+    if os.exec(['nc', '-u', '-p3000']) != 0 {
+        eprint("exec(): {errno.str()}")
+        os.exit(1)
+    }
+'''
+
+pub fn help(x: Any) {
+    let x = docRef(x)
+
+    let doc = fn (x) {
+        return table[x] ?? doc(x)
+    }
+
+    let helpString = Blob()
+    let p = fn (*args, sep=', ', end='\n') {
+        helpString.push(args.join(sep) ?? '');
+        helpString.push(end);
+    }
+
+    fn pdoc(s: String, indent: Int) {
+        let lines = s.lines().dropWhile!(/^\s*$/)
+
+        // Remove trailing empty lines at the end.
+        while #lines > 0 && lines[-1].match?(/^\s*$/) {
+            lines.pop()
+        }
+
+        // Find the leading whitespace length common to all lines
+        let leading = lines.map(\#_.match(/^\s*/)).min() ?? 0
+
+        for line in lines.map!(&slice(leading)) {
+            p(''.lpad(indent), line, sep='')
+        }
+    }
+
+    match doc(x) {
+        (name, doc, [*ms]) => {
+            p("class {name}:")
+            if doc != nil {
+                p()
+                pdoc(doc, 4)
+            }
+            for (name, proto, doc) in ms {
+                p()
+                if doc != nil {
+                    p("    {name.comb(/^\w+\./)}{proto}:")
+                    p()
+                    pdoc(doc, 6)
+                } else {
+                    p("    {name.comb(/^\w+\./)}{proto}")
+                }
+            }
+            p()
+        },
+
+        (name, proto, doc) => {
+            if doc :: String {
+                p("{name}{proto}:")
+                p()
+                pdoc(doc, 4)
+                p()
+            } else {
+                p("{name}{proto}")
+            }
+        },
+
+        nil => {
+            p("No help for {x}.")
+        }
+    }
+
+    let p = os.spawn(['less', '-FRX'], stdin=os.SPAWN_PIPE)
+    os.write(p.stdin, helpString.str!())
+    os.close(p.stdin)
+    os.wait(p.pid)
+}

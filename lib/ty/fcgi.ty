@@ -1,0 +1,426 @@
+import os
+import io
+import errno
+import json
+import log (..)
+
+let FCGI_LISTENSOCK_FILENO  = 0;
+
+let FCGI_HEADER_LEN         = 8;
+
+let FCGI_VERSION_1          = 1;
+
+let FCGI_BEGIN_REQUEST      = 1;
+let FCGI_ABORT_REQUEST      = 2;
+let FCGI_END_REQUEST        = 3;
+let FCGI_PARAMS             = 4;
+let FCGI_STDIN              = 5;
+let FCGI_STDOUT             = 6;
+let FCGI_STDERR             = 7;
+let FCGI_DATA               = 8;
+let FCGI_GET_VALUES         = 9;
+let FCGI_GET_VALUES_RESULT  = 10;
+let FCGI_UNKNOWN_TYPE       = 11;
+let FCGI_MAXTYPE            = FCGI_UNKNOWN_TYPE;
+
+let FCGI_NULL_REQUEST_ID    = 0;
+
+let FCGI_KEEP_CONN          = 1;
+
+let FCGI_RESPONDER          = 1;
+let FCGI_AUTHORIZER         = 2;
+let FCGI_FILTER             = 3;
+
+let FCGI_REQUEST_COMPLETE   = 0;
+let FCGI_CANT_MPX_CONN      = 1;
+let FCGI_OVERLOADED         = 2;
+let FCGI_UNKNOWN_ROLE       = 3;
+
+let FCGI_MAX_CONNS  = "FCGI_MAX_CONNS";
+let FCGI_MAX_REQS   = "FCGI_MAX_REQS";
+let FCGI_MPXS_CONNS = "FCGI_MPXS_CONNS";
+
+let statusText = %{
+    200: 'OK',
+    400: 'Bad Request',
+    401: 'Unauthorized',
+    404: 'Not Found'
+}
+
+class FCGIParser {
+    __buffer: Blob
+    __fd: Int
+    __parser: Generator[(String, Dict[String, String], Int)]
+
+
+    init(fd) {
+        __fd = fd
+        __buffer = Blob()
+        __parser = __start()
+        (__parser)()
+    }
+
+    next(n: Int) -> Blob  {
+        let more = () -> (yield nil)
+
+        while #__buffer < (n ?? 1) {
+            __buffer.push(more())
+        }
+
+        __buffer.splice(0, n)
+    }
+
+    next() -> Int {
+        next(1)[0]
+    }
+
+   __start*() -> Generator[(String, Dict[String, String], Int)] {
+        while true {
+            let body = blob()
+            let params = %{}
+
+            while true {
+                let next = self.next
+
+                let nextShort = fn () {
+                    let b = next(2)
+                    (b[0] << 8) + b[1]
+                }
+
+                let version   = next()
+                let type      = next()
+                let requestID = nextShort()
+
+                let contentLength = nextShort()
+                let paddingLength = next()
+
+                next()
+
+                let content = next(contentLength)
+
+                next(paddingLength)
+
+                let rec = FCGIRecord(version, type, requestID, content)
+
+                match type {
+                    ::FCGI_BEGIN_REQUEST => {
+                        // TODO
+                    },
+
+                    ::FCGI_PARAMS => {
+                        params += rec.getParams()
+                    },
+
+                    ::FCGI_STDIN => {
+                        if #rec.content == 0 {
+                            break
+                        } else {
+                            body.push(rec.content)
+                        }
+                    },
+
+                    _ => {}
+                }
+            }
+
+            yield (body.str!(), params, __fd)
+        }
+    }
+
+    push(data) -> nil | (String , Dict[String, String], Int) {
+        if let Some($request) = (__parser)(data) {
+            request
+        }
+    }
+}
+
+class FCGIRecord {
+    version: Int
+    type: Int
+    requestID: Int
+    content: Blob
+
+    getParams() -> Dict[String, String] {
+        let b = content
+        let ps = %{}
+
+        while b.size() != 0 {
+            let nameLength = getLength(b)
+            let valueLength = getLength(b)
+            let name = b.splice(0, nameLength).str()
+            let value = b.splice(0, valueLength).str()
+            ps[name] = value
+        }
+
+        return ps
+    }
+}
+
+fn getLength(b: Blob) -> Int {
+    if (b[0] >> 7) == 1 {
+        let n = ((b[0] & 0x7F) << 24)
+              + (b[1] << 16)
+              + (b[2] << 8)
+              + b[3]
+        b.splice(0, 4)
+        return n
+    } else {
+        let n = b[0]
+        b.splice(0, 1)
+        return n
+    }
+}
+
+fn decode(s) {
+    s.sub('+', ' ')
+     .sub(/%../, s -> chr(int(s.slice(1), 16)))
+     .sub("\r\n", "\n")
+     .sub("\r", "\n")
+}
+
+fn urlDecode(s: String) -> Dict[String, String] {
+    let components = s.split('&');
+    let pairs = [c.split('=').map(decode) for c in components];
+    return %{k: v for [k, v] in pairs};
+}
+
+class FCGIRequest {
+    __app: FCGIApp
+    __fd: Int
+    __stream: io.Stream
+    __body: String
+    __params: Dict[String, String]
+
+    init(
+        app: FCGIApp,
+        fd: Int,
+        stream: io.Stream,
+        body: String,
+        ps: Dict[String, String]
+    ) {
+        __app = app
+        __fd = fd
+        __stream = stream
+        __body = body
+        __params = ps
+    }
+
+    sendHTML(html: String, headers: Array[(String, String)] = [], status: Int = 200) {
+        sendResponse(
+            status,
+            html,
+            [
+                ('Content-Type', 'text/html'),
+                *headers
+            ]
+        )
+    }
+
+    sendJSON(x: _, headers: Array[(String, String)] = [], status: Int = 200) {
+        sendResponse(
+            status,
+            json.encode(x),
+            [
+                ('Content-Type', 'application/json'),
+                *headers
+            ]
+        )
+    }
+
+    sendResponse(status: Int, body: String | Blob = '', headers: Array[(String, String)] = []) {
+        let buffer = blob()
+        let push = buffer.push
+        let exitStatus = 0
+
+        let output = blob()
+
+        for (k, v) in headers {
+            output.push("{k}: {v}\r\n")
+        }
+
+        output.push("Status: {status} {statusText[status]}\r\n\r\n")
+        output.push(body)
+
+        let size = #output
+        let offset = 0
+
+        while size > 0xFFFF {
+            push(FCGI_VERSION_1);
+            push(FCGI_STDOUT);
+            push(0);
+            push(1);
+            push(0xFF);
+            push(0xFF);
+            push(0);
+            push(0);
+            push(output.slice(offset, 0xFFFF));
+            __stream.write(buffer)
+            buffer.clear();
+
+            size -= 0xFFFF
+            offset += 0xFFFF
+        }
+
+
+        if size > 0 {
+            push(FCGI_VERSION_1);
+            push(FCGI_STDOUT);
+            push(0);
+            push(1);
+            push(size >> 8);
+            push(0xFF & size);
+            push(0);
+            push(0);
+            push(output.slice(offset));
+            __stream.write(buffer)
+            buffer.clear();
+        }
+
+        push(FCGI_VERSION_1);
+        push(FCGI_STDOUT);
+        push(0);
+        push(1);
+        push(0);
+        push(0);
+        push(0);
+        push(0);
+        __stream.write(buffer)
+        buffer.clear();
+
+        push(FCGI_VERSION_1);
+        push(FCGI_END_REQUEST);
+        push(0);
+        push(1);
+        push(0);
+        push(8);
+        push(0);
+        push(0);
+        push((exitStatus >> 24) & 0xFF);
+        push((exitStatus >> 16) & 0xFF);
+        push((exitStatus >> 8) & 0xFF);
+        push(exitStatus & 0xFF);
+        push(FCGI_REQUEST_COMPLETE);
+        push(0);
+        push(0);
+        push(0);
+
+        __stream.write(buffer)
+        __stream.flush()
+
+        __app.report-dead(__stream)
+    }
+
+    queryParams() {
+        return urlDecode(__params['QUERY_STRING']);
+    }
+
+    [](param: String) -> ?String {
+        __params[param]
+    }
+
+    formData() {
+        if __params['CONTENT_TYPE'].match?(/^multipart\/form-data/) {
+            let form = %{}
+            let offset = 0
+            let delim = match __body { /^(.*)\r\n/ => $1 }
+
+            while let $i = __body.bsearch(delim, offset) {
+                if not let $j = __body.bsearch('\r\n\r\n', i) {
+                    break
+                }
+                let headers = __body.bsplice(i + #delim + 2, j).split(/\r\n/)
+                offset = __body.bsearch(delim, j)
+                let content = __body.bsplice(j + 4, (offset - 2)!)
+                let headers = %{k.lower(): v for [k, v] in headers.map(&split(': ', 1))}
+                let disposition = %{k: v for [_, k, v] in headers['content-disposition'].matches(/(\w+)="([^"]+)"/)}
+                let name = disposition['name']
+
+                if let $filename = disposition['filename'] {
+                    let f = {
+                        name: filename,
+                        type: headers['content-type'],
+                        content: Blob(content)
+                    }
+                    if let $fs = form[name] {
+                        fs.push(f)
+                    } else {
+                        form[name] = [f]
+                    }
+                } else {
+                    form[disposition['name']] = content
+                }
+            }
+
+            return form
+        } else if __params['CONTENT_TYPE'].match?(/^application\/x-www-form-urlencoded/) {
+            return urlDecode(__body)
+        } else {
+            return urlDecode(__params['QUERY_STRING'])
+        }
+    }
+}
+
+pub class FCGIApp {
+    __clients: Array[(Int, FCGIParser)]
+    __death:   Sync[Array[io.Stream]]
+    __socket:  Int
+
+    init(socket) {
+        __socket = socket
+        __death = Sync([])
+        __clients = []
+    }
+
+    report-dead(stream: io.Stream) {
+        __death.push(stream)
+    }
+
+    run*() {
+        while true {
+            while #__death > 0 {
+                __death.pop().close()
+            }
+
+            match os.poll([__socket, *[(c.0, os.POLLIN, c.1) for c in __clients]], 50) {
+                Ok(fds) => {
+                    warn!(fds)
+                    for match fds {
+                        (_, ev) and (ev & os.POLLIN) => {
+                            error!("Accepting connection!")
+                            let (conn, addr) = os.accept(__socket)
+                            __clients.push((conn, FCGIParser(conn)))
+                        },
+
+                        (conn, ev, _) and ev & (os.POLLNVAL | os.POLLERR)  => {
+                            __clients.filter!(\_.0 != conn)
+                        }
+
+                       (conn, _, parser) => {
+                            if let $data = os.read(conn, 4096) {
+                                if let (body, params, fd) = parser.push(data) {
+                                    yield FCGIRequest(
+                                        self,
+                                        fd,
+                                        io.open(fd as Int, 'w'),
+                                        body,
+                                        params
+                                    )
+                                }
+                            } else {
+                                __clients.filter!(\_.0 != conn)
+                            }
+                        },
+
+                        _ => ()
+                    }
+                },
+
+                Err(0) => (),
+
+                Err(err) => {
+                    error!("poll(): {err}")
+                }
+            }
+        }
+    }
+}

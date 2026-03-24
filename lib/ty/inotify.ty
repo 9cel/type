@@ -1,0 +1,120 @@
+import ffi as c (C!)
+import os
+
+pub const IN_ACCESS        = 0x00000001
+pub const IN_MODIFY        = 0x00000002
+pub const IN_ATTRIB        = 0x00000004
+pub const IN_CLOSE_WRITE   = 0x00000008
+pub const IN_CLOSE_NOWRITE = 0x00000010
+pub const IN_CLOSE         = (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)
+pub const IN_OPEN          = 0x00000020
+pub const IN_MOVED_FROM    = 0x00000040
+pub const IN_MOVED_TO      = 0x00000080
+pub const IN_MOVE          = (IN_MOVED_FROM | IN_MOVED_TO)
+pub const IN_CREATE        = 0x00000100
+pub const IN_DELETE        = 0x00000200
+pub const IN_DELETE_SELF   = 0x00000400
+pub const IN_MOVE_SELF     = 0x00000800
+
+pub const IN_UNMOUNT       = 0x00002000
+pub const IN_Q_OVERFLOW    = 0x00004000
+pub const IN_IGNORED       = 0x00008000
+
+pub const IN_ONLYDIR       = 0x01000000
+pub const IN_DONT_FOLLOW   = 0x02000000
+pub const IN_EXCL_UNLINK   = 0x04000000
+pub const IN_MASK_CREATE   = 0x10000000
+pub const IN_MASK_ADD      = 0x20000000
+pub const IN_ISDIR         = 0x40000000
+pub const IN_ONESHOT       = 0x80000000
+
+pub const IN_ALL_EVENTS = (
+    IN_ACCESS | IN_MODIFY | IN_ATTRIB
+    | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE
+    | IN_OPEN | IN_MOVED_FROM | IN_MOVED_TO
+    | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF
+)
+
+C! struct InotifyEvent {
+    int32_t wd;
+    uint32_t mask;
+    uint32_t cookie;
+    uint32_t len;
+}
+
+C! fn {
+    int inotify_init();
+    int inotify_init1(int flags);
+    int inotify_add_watch(int fd, const char *path, uint32_t mask);
+    int inotify_rm_watch(int fd, int wd);
+}
+
+let __evt_size = c.size(InotifyEvent_C)
+
+use Event = {
+    wd:     Int,
+    mask:   Int,
+    cookie: Int,
+    name:   String | nil
+}
+
+pub class Inotify {
+    __fd: Int
+    __buf: Blob
+    __off: Int
+
+    init(flags: Int = 0) {
+        __fd = flags != 0 ? inotify_init1(flags) : inotify_init()
+        __buf = Blob()
+        __off = 0
+    }
+
+    fd -> Int { __fd }
+
+    add(path: String, mask: Int) -> Int {
+        inotify_add_watch(__fd, path.cstr(), mask)
+    }
+
+    remove(wd: Int) -> Int {
+        inotify_rm_watch(__fd, wd)
+    }
+
+    __fill() -> Bool {
+        __buf.clear()
+        __off = 0
+        let data = os.read(__fd, 4096)
+        if data == nil { return false }
+        __buf = data
+        return true
+    }
+
+    __next-event() -> Event | nil {
+        if __off + __evt_size > __buf.size() { return nil }
+        let ev = InotifyEvent(__buf.ptr() + __off)
+        __off += __evt_size
+        let name = if ev.len > 0 {
+            let s = c.str(__buf.ptr() + __off)
+            __off += ev.len
+            s
+        }
+        return {wd: ev.wd, mask: ev.mask, cookie: ev.cookie, name}
+    }
+
+    ready?(timeout: Float = -1.0) -> Bool {
+        os.poll([(__fd, os.POLLIN)], [], timeout) > 0
+    }
+
+    events*(timeout: Float = -1.0) {
+        // Yield any buffered events first
+        while let $ev = __next-event() { yield ev }
+
+        while ready?(timeout) {
+            if !__fill() { break }
+            while let $ev = __next-event() { yield ev }
+        }
+    }
+
+    close() {
+        os.close(__fd)
+    }
+}

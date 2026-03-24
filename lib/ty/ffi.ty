@@ -1,0 +1,1022 @@
+import ffi as c
+import ty
+import ty.token (next, peek)
+import ty.parse (expr, stmt)
+import ty.lex as lex
+import ty.types as types
+import ptr (typed)
+
+__set_type__ c::i8      CType[Int];
+__set_type__ c::i16     CType[Int];
+__set_type__ c::i32     CType[Int];
+__set_type__ c::i64     CType[Int];
+__set_type__ c::u8      CType[Int];
+__set_type__ c::u16     CType[Int];
+__set_type__ c::u32     CType[Int];
+__set_type__ c::u64     CType[Int];
+__set_type__ c::char    CType[Int];
+__set_type__ c::uchar   CType[Int];
+__set_type__ c::int     CType[Int];
+__set_type__ c::uint    CType[Int];
+__set_type__ c::short   CType[Int];
+__set_type__ c::ushort  CType[Int];
+__set_type__ c::long    CType[Int];
+__set_type__ c::ulong   CType[Int];
+__set_type__ c::float   CType[Float];
+__set_type__ c::double  CType[Float];
+__set_type__ c::ptr     CType[Ptr[Any]];
+__set_type__ c::void    CType[nil];
+
+fn c::str(ptr: IntoPtr[Any], len: ?Int) -> String;
+fn c::as_str(ptr: IntoPtr[Any], len: ?Int) -> String;
+fn c::load[T](type: CType[T], address: IntoPtr[T]) -> T;
+fn c::size[T](type: CType[T]) -> Int;
+fn c::free(ptr: IntoPtr[Any]) -> nil;
+fn c::new[T](type: CType[T], count: ?Int) -> Ptr[T];
+fn c::box[T](type: CType[T], val: ?T) -> Ptr[T];
+fn c::alloc[T](size: Int) -> Ptr[T];
+fn ptr::typed[T](ptr: Ptr[Any], type: CType[T]) -> Ptr[T];
+
+macro __unpack-types! $$[
+    $${
+        fn unpacked(t0) {
+            match t0 {
+                types::String(fmt) => do {
+                    let ts = []
+                    let i = 0
+
+                    if i < #fmt and fmt[i] in ['>', '<', '!', '=', '@'] {
+                        i += 1
+                    }
+
+                    while i < #fmt {
+                        let count = 0
+                        while i < #fmt and fmt[i] >= '0' and fmt[i] <= '9' {
+                            count = count * 10 + int(fmt[i])
+                            i += 1
+                        }
+                        if count == 0 { count = 1 }
+                        if i >= #fmt { break }
+
+                        let ch = fmt[i]
+                        i += 1
+
+                        match ch {
+                            'x' => (),
+                            's' => ts.push(types.Object(Blob, [])),
+                            'f' or 'd' => for ..count { ts.push(types.Object(Float, [])) },
+                            '?' => for ..count { ts.push(types.Object(Bool, [])) },
+                            _ => for ..count { ts.push(types.Object(Int, [])) }
+                        }
+                    }
+
+                    match ts {
+                        [t] => t,
+                        _   => types.Record(*ts)
+                    }
+                },
+
+                _ => types.Unknown
+            }
+        }
+    }
+$$]
+
+fn c::unpack[T](fmt: T, buf: IntoPtr[Any], off: Int = 0) -> __unpack-types!(T);
+
+pub __tls::_cif_cache: _ = nil
+
+tag Union;
+tag Struct;
+
+//fn dbg(*args) { args[-1] }
+
+fn fail(msg: String) {
+    throw RuntimeError("C! macro error: {msg}")
+}
+
+fn next!(t) {
+    while peek().type == 'comment' { next() }
+    if peek().type != t {
+        fail("expected `{t}` but found: {peek()}")
+    }
+    next()
+}
+
+pub fn getCif(rt, *aTypes, nFixed: ?Int) {
+    let cifs = _cif_cache ?? (_cif_cache = %{})
+    let signature = (rt, aTypes, nFixed)
+    match cifs[signature] {
+        $cif => cif,
+        _    => cifs[signature] = c.cif(rt, *aTypes, nFixed=nFixed)
+    }
+}
+
+pub fn wrap(lib, name: String, rType: _ = nil, *aTypes: _, func-ptr?: Bool = false) -> _ {
+    if not let $fp = c.dlsym(name, lib) {
+        throw RuntimeError("Failed to load symbol '{name}'")
+    }
+
+    aTypes.remove!(c.void)
+          .map!(t -> (t :: Ptr) ? t : t.ctype())
+
+    if rType :: Ptr {
+        let interface = getCif(rType, *aTypes)
+        return func-ptr?
+             ? fn func(*args) { c.call(interface, fp[0], *args) }
+             : c.fun(fp, interface, name)
+    } else {
+        let interface = getCif(rType.ctype(), *aTypes)
+        return fn func(*args, out=rType()) {
+            c.call(interface, func-ptr? ? fp[0] : fp, *args, out=out.get())
+            out
+        }
+    }
+}
+
+pub fn array[T](type: CType[T], xs: Iterable[T, Int]) {
+    let buffer = typed(c.alloc(c.size(type) * #xs), type)
+
+    for x, i in xs {
+        buffer[i] = x
+    }
+
+    return buffer
+}
+
+/**
+ * Try tomap a type expression denoting a C type to the corresponding Ty type
+ * e.g.
+ *
+ * ```
+ * const __u32 = c.u32
+ *
+ * C! struct Foo {
+ *     __u32 a;
+ * }
+ * ```
+ *
+ * ffi-type($$[ __u32 $$]) => Int, so the generated getter for `a` will have a
+ * return type annotation of Int
+ */
+pub fn ffi-type(expr: _, coerce: Bool = false) -> _ {
+    catch _ {
+        return ty.Any
+    }
+    match ty.eval(expr, ty.scope()) {
+        c::u8, c::u16, c::u32, c::u64,
+        c::i8, c::i16, c::i32, c::i64,
+        c::int, c::uint, c::long, c::ulong => (
+            coerce ? $$[ $$::(Int) | $$::(Float) $$]
+                   : $$[ $$::(Int) $$]
+        ),
+
+        c::float, c::double => (
+            coerce ? $$[ $$::(Float) | $$::(Int) $$]
+                   : $$[ $$::(Float) $$]
+        ),
+
+        c::ptr => coerce ? $$[ $$::(IntoPtr)[_] $$] : $$[ $$::(Ptr)[_] $$]
+    }
+}
+
+pub fn wrapVar[a](lib, name, nFixed, rType, *aTypes) -> _ {
+    if not let $fp = c.dlsym(name, lib) {
+        throw RuntimeError("Failed to load symbol '{name}'")
+    }
+
+    return fn (*args: _) -> _ {
+        let aTypes = aTypes.clone()
+
+        for i in nFixed..#args {
+            let (t, x) = args[i]
+            aTypes.push(t)
+            args[i] = x
+        }
+
+        let interface = getCif(rType, *aTypes, nFixed=nFixed)
+
+        let y = c.call(interface, fp, *args)
+
+        return y
+    }
+}
+
+pub fn iter(type, p, n) {
+    let size = c.size(type)
+    for i in ..n {
+        yield c.load(type, p + i*size)
+    }
+}
+
+pub memcpy = wrap(nil, 'memcpy', c.ptr, c.ptr, c.ptr, c.u64)
+pub strlen = wrap(nil, 'strlen', c.u64, c.ptr)
+pub memcmp = wrap(nil, 'memcmp', c.int, c.ptr, c.ptr, c.u64)
+pub strcmp = wrap(nil, 'strcmp', c.int, c.ptr, c.ptr)
+pub memset = wrap(nil, 'memset', c.void, c.ptr, c.int, c.u64)
+pub strcpy = wrap(nil, 'strcpy', c.ptr, c.ptr, c.ptr)
+
+fn _syscall(nr: Int, *args: Any) -> Int { -1 }
+pub syscall: (typeof _syscall) = wrapVar(nil, 'syscall', 1, c.long, c.long)
+
+fn nexttype(array-to-ptr?: Bool = true, has-name?: ?Bool = nil) {
+    const ignore = /^(?:const|union|struct|restrict|register|auto|volatile|atomic|_Atomic|noreturn|_Noreturn|\*)$/
+
+    const types = /^(?:
+        char|short|int|long|signed|unsigned
+       |float|double
+       |u8|u16|u32|u64
+       |u?int(?:8|16|32|64)_t
+       |size_t|ssize_t
+       |uintmax_t|intmax_t
+       |uintptr_t|intptr_t|ptrdiff_t
+       |enum
+       |void
+    )$/x
+
+    const map = static!(%{
+        'char':                   c.char,
+        'signed char':            c.char,
+        'unsigned char':          c.uchar,
+        'int':                    c.int,
+        'signed':                 c.int,
+        'unsigned':               c.uint,
+        'signed int':             c.int,
+        'unsigned int':           c.uint,
+        'short':                  c.short,
+        'short int':              c.short,
+        'signed short':           c.short,
+        'signed short int':       c.short,
+        'unsigned short':         c.ushort,
+        'unsigned short int':     c.ushort,
+        'long':                   c.long,
+        'long int':               c.long,
+        'signed long':            c.long,
+        'signed long int':        c.long,
+        'unsigned long':          c.ulong,
+        'unsigned long int':      c.ulong,
+        'long long':              c.i64,
+        'long long int':          c.i64,
+        'unsigned long long':     c.u64,
+        'unsigned long long int': c.u64,
+        'float':                  c.float,
+        'double':                 c.double,
+        'u8':                     c.u8,
+        'u16':                    c.u16,
+        'u32':                    c.u32,
+        'u64':                    c.u64,
+        'int8_t':                 c.i8,
+        'int16_t':                c.i16,
+        'int32_t':                c.i32,
+        'int64_t':                c.i64,
+        'uint8_t':                c.u8,
+        'uint16_t':               c.u16,
+        'uint32_t':               c.u32,
+        'uint64_t':               c.u64,
+        'size_t':                 c.u64,
+        'ssize_t':                c.i64,
+        'uintmax_t':              c.u64,
+        'intmax_t':               c.i64,
+        'uintptr_t':              c.u64,
+        'intptr_t':               c.i64,
+        'ptrdiff_t':              c.i64,
+        'enum':                   c.int,
+        'void':                   c.void
+    })
+
+    let allow-name? = (has-name? != false)
+    let need-name?  = (has-name? == true)
+
+    let parts = []
+
+    while match (peek().type, peek(1).type) {
+        (')', _),
+        (_, '('),
+        (';', _) => { break },
+
+        (_, '.') => {
+            let e = expr(1)
+
+            // Allow stuff like f(c.int error_code) by just ignoring the identifier
+            return e, (allow-name? && peek().type == 'id') ?: next().id
+        },
+
+        ('const', _)   => { next()                  },
+        ('comment', _) => { next()                  },
+        ('id',  _)     => { parts.push(next().id)   },
+        ('*',   _),
+        ('**',  _),
+        ('***', _)     => { next(); parts.push('*') }
+    }
+
+    if array-to-ptr? && peek().type == '[' {
+        while peek().type == '[' {
+            next()
+            if peek().type != ']' {
+                expr(0)
+            }
+            next!(']')
+        }
+        parts.push('*')
+    }
+
+    let ptr? = ('*' in parts)
+    let (base, extra) = parts.reject!(\_ :: ignore).partition(\_ :: types)
+
+    if let $t = (ptr? ? c.ptr : map[base.sort!(desc=true).unwords()]) {
+        return ty.Value(t), extra(-1).or-else(nil)
+    }
+
+    match extra {
+        [t, *, name] => { return ty.Id({name: t}), name }
+        [t]          => { return ty.Id({name: t}), nil  },
+
+    }
+}
+
+fn nextproto() -> (Array[AST], Bool) {
+        let params = []
+        let variadic = false
+
+        next!('(')
+
+        while match peek().type {
+            ')' => { break },
+
+            '...' => {
+                variadic = true
+                next()
+                break
+            },
+
+            'comment' => { next() },
+
+            _ => {
+                params.push(nexttype())
+                if peek().type == ',' {
+                    next()
+                }
+            }
+
+        }
+
+        next!(')')
+
+        return (params, variadic)
+}
+
+use LexState = {
+    source: String,
+    position: {
+        line: Int,
+        col: Int,
+        byte: Int
+    }
+}
+
+fn cfun() {
+    let public = peek().type == 'pub'
+    if public { next() }
+
+    let (lib, prefix) = match (peek().type, peek(1)) {
+        ('fn', _)               => (ty.Nil, ''),
+        ('id', {type: 'fn', *}) => (expr(99), ''),
+        ('id', {str, *})        => (expr(99), next().str),
+        _                       => (expr(99), '')
+    }
+
+    next!('fn')
+
+    fn mkfdef(
+        name,
+        rt: AST,
+        params: Array[AST],
+        variadic: Bool = false,
+        proto-string: ?String,
+        doc-string: ?String
+    ) {
+        let args = [
+            ty.Arg(arg: lib),
+            ty.Arg(arg: ty.String(prefix + name)),
+            ty.Arg(arg: rt),
+            *(ty.Arg(arg: p) for (p: AST) in params)
+        ]
+
+        let wrap = if variadic {
+            args.insert(2, ty.Arg(arg: ty.Value(#params)))
+            wrap-var
+        } else {
+            wrap
+        }
+
+        let param-types = [ffi-type(it, coerce=true) for params]
+                        + [ty.Spread(ty.Pair($$[$$::(CType)[$$::(Any)]$$], ty.Any)) if variadic]
+
+        let type = ty.FuncType(
+            ty.Record([ty.RecordEntry({item: it}) for param-types]),
+            ffi-type(rt)
+        )
+
+        ty.Let(
+            ty.Id({name, constraint: type}),
+            ty.Call(
+                func: $$[ prelude::set-doc $$],
+                args: [
+                    ty.Arg(arg: ty.Call(func: ty.Value(wrap), args: args)),
+                    ty.Arg(name: 'name', arg: ty.String(name)),
+                    ty.Arg(name: 'proto', arg: ty.String(proto-string)) if proto-string,
+                    ty.Arg(name: 'doc', arg: ty.String(doc-string)) if doc-string,
+                ]
+            ),
+            public: public
+        )
+    }
+
+    if peek().type == 'id' {
+        let name = next().id
+
+        let (ps, var?) = nextproto()
+
+        // ->
+        next!('->')
+
+        let rt: AST = expr(0)
+
+        return mkfdef(name, rt, ps, var?)
+    } else {
+        // {
+        next!('{')
+
+        let funs = []
+
+        while peek().type != '}' {
+            let doc = nil
+
+            while peek().type == 'comment' {
+                doc = "{doc ?? ''}{next().comment}"
+            }
+
+            let source = lex.state().source
+
+            let i = peek().start.byte
+            let rt: AST = nexttype(has-name?=false)
+            let j = peek(-1).end.byte
+            let rt-string = source.bsplice(i, j)
+
+            let name = next().id
+
+            let i = peek().start.byte
+            let (ps, var?) = nextproto()
+            let j = peek(-1).end.byte
+            let proto-string = source.bsplice(i, j).strip().comb(/^\(|\)$/)
+
+            if peek().type == ';' { next() }
+
+            funs.push(
+                mkfdef(
+                    name,
+                    rt,
+                    ps,
+                    var?,
+                    "({proto-string}) -> {rt-string.strip()}",
+                    doc
+                )
+            )
+        }
+
+        // }
+        next()
+
+        return ty.Multi(funs)
+    }
+}
+
+/*
+ * C! struct Foo {
+ *      c.int a;
+ *      c.ptr p;
+ *      c.u8 data[10];
+ * }
+ */
+fn strct() {
+    let peek_ = peek
+    let next_ = next
+
+    let next = fn () {
+        while peek_().type == 'comment' {
+            next_()
+        }
+        next_()
+    }
+
+    let peek = fn (i=0) {
+        let j = 0
+
+        for (;;) {
+            while peek_(j).type == 'comment' { j += 1 }
+            if i == 0 { return peek_(j) }
+            i -= 1
+            j += 1
+        }
+    }
+
+    let pub? = if peek().type == 'pub' {
+        next()
+        true
+    } else {
+        false
+    }
+
+    // struct
+    next!('id')
+
+    let structName = next().id
+
+    next!('{')
+
+    use SimpleFieldDecl = {t: AST, name: String, count: AST}
+
+    use FieldDecl = SimpleFieldDecl
+                  | Struct[Array[FieldDecl]]
+                  | Union[(AST, Array[FieldDecl])]
+
+    let get-count = fn () -> AST {
+        if peek().type == '[' {
+            next()
+            let n = expr(0)
+            next!(']')
+            n
+        }
+    }
+
+    fn get-decl() -> Array[SimpleFieldDecl] {
+        let $t, $name = nexttype(array-to-ptr?=false, has-name?=true)
+        let names = [(name, get-count())]
+
+        while peek().type == ',' {
+            next()
+            names.push((next().id, get-count()))
+        }
+
+        next!(';')
+
+        [{t, name, count} for (name, count) in names]
+    }
+
+    fn member-ctype(decl: _) -> _ {
+        match decl {
+            Struct((inner: _)) => do {
+                let ts = inner.map(fn (d: _) ty.Arg(arg: member-ctype(d)))
+                ty.Call(func: ty.Value(c.struct), args: ts)
+            },
+            Union(((ut: _), _)) => ut,
+            {t, count: nil, *} => t,
+            (decl: _) => do {
+                let mkstruct = (t, n) -> c.struct(*[t for ..n])
+                $$[$${mkstruct}($$(decl.t), $$(decl.count))$$]
+            }
+        }
+    }
+
+    fn compute-union-type(decls: _) -> _ {
+        let type-alternatives: _ = ty.Array(
+            decls.map(fn (d: _) -> _ ty.ArrayItem(item: member-ctype(d)))
+        )
+        $$[$$type-alternatives.max-by($${c.size})$$]
+    }
+
+    fn prefix-decl-names(decls: _, pre) {
+        for d, idx in decls {
+            match d {
+                Struct((inner: _))      => prefix-decl-names(inner, pre),
+                Union((_, (inner: _)))  => prefix-decl-names(inner, pre),
+                _                       => { decls[idx] = {*d, name: "{pre}_{d.name}"} }
+            }
+        }
+    }
+
+    fn parse-members() -> Array[FieldDecl] {
+        let members: Array[FieldDecl] = []
+
+        while peek().type != '}' {
+            if peek().?id == 'union' && peek(1).type == '{' {
+                next() // union
+                next!('{')
+                let inner = parse-members()
+                next!('}')
+                next!(';')
+                let ut = compute-union-type(inner)
+                members.push(Union(ut, inner))
+            } else if peek().?id == 'struct' && peek(1).type == '{' {
+                next() // struct
+                next!('{')
+                let inner = parse-members()
+                next!('}')
+
+                if (peek().?type, peek(1).?type) == ('id', ';') {
+                    let pre = next().id
+                    prefix-decl-names(inner, pre)
+                }
+
+                next!(';')
+                members.push(Struct(inner))
+            } else {
+                members += get-decl()
+            }
+        }
+
+        members
+    }
+
+    let members = parse-members()
+
+    next!('}')
+
+    let ctype = ty.Id(name: "{structName}_C")
+
+    fn collect-names(decls: _) -> _ {
+        decls.map(fn (d: _) -> _ match d {
+            Union(_, (inner: _)) => collect-names(inner),
+            Struct((inner: _))   => collect-names(inner),
+            _                    => [d.name]
+        }).flat()
+    }
+
+    let member-names = collect-names(members)
+
+    let init-params = [ty.Param({name: it, constraint: ty.Any}) for member-names]
+
+    let init = ty.Func(
+        name: 'init',
+        params: [ty.Param(name: '<p>', default: ty.Nil, constraint: ty.Any), *init-params],
+        body: ty.If(
+            [$$[`<p>` != nil$$]],
+            $$[ self.`<p>` = `<p>` $$],
+            ty.Multi([
+                $$[ self.`<p>` = c.new($$ctype) $$],
+                *[
+                    $$[ $$(ty.MemberAccess($$[ self $$], name)) = $$(ty.Id({name})) $$]
+                    for name in member-names
+                ]
+            ])
+        )
+    )
+
+    let get = ty.Func(
+        name: 'get',
+        params: [],
+        body: ty.Call(
+            func: ty.Value(typed),
+            args: [
+                ty.Arg(arg: ty.MemberAccess(ty.Id(name: 'self'), '<p>')),
+                ty.Arg(arg: ctype)
+            ]
+        )
+    )
+
+    let __ptr__ = ty.Func(
+        name: '__ptr__',
+        params: [],
+        body: ty.Call(
+            func: ty.Value(typed),
+            args: [
+                ty.Arg(arg: ty.MemberAccess(ty.Id(name: 'self'), '<p>')),
+                ty.Arg(arg: ctype)
+            ]
+        )
+    )
+
+    let structArgs = []
+    let methods: Array[ty.Func[_Func]] = []
+    let getters: Array[ty.Func[_Func]] = []
+    let setters: Array[ty.Func[_Func]] = []
+    let fields:  Array[_] = []
+
+    fn add-member(i: ?Int, name, t, count, off: Int | AST = 0) {
+        if i == nil {
+            i = #structArgs
+
+            let mkstruct = (t, n) -> c.struct(*[t for ..n])
+
+            if count != nil {
+                structArgs.push(ty.Arg(arg: $$[ $${mkstruct}($$t, $$count) $$]))
+            } else {
+                structArgs.push(
+                    ty.Arg(arg: $$[ ($$t :: $${Ptr}) ? $$t : $$t.ctype() $$])
+                )
+            }
+        }
+
+        if count != nil {
+            methods.push(
+                ty.Func(
+                    name: name,
+                    params: [ty.Gather('args')],
+                    body: $$[
+                        if #args > 0 {
+                            let [x] = args
+                            let p = x.ptr()
+                            $${memcpy}($${c.pmember}($$ctype, self.`<p>`, $${i}), p ?? x, $${c.size}($$t) * $$count)
+                        } else {
+                            $${typed}($${c.pmember}($$ctype, self.`<p>`, $${i}), $$t)
+                        }
+                    $$]
+                )
+            )
+        } else {
+            let pmem = (off == 0) ? $$[
+                $${c.pmember}($$ctype, self.`<p>`, $${i})
+            $$] : $$[
+                $${ptr::typed}($${c.pmember}($$ctype, self.`<p>`, $${i}), $${c.u8}) + $$off
+            $$]
+
+            let mem = (off == 0) ? $$[
+                $${c.member}($$ctype, self.`<p>`, $${i})
+            $$] : $$[
+                $${c.load}($$t, $${ptr::untyped}($${c.pmember}($$ctype, self.`<p>`, $${i})) + $$off)
+            $$]
+
+            let store = (off == 0) ? $$[
+                $${c.member}($$ctype, self.`<p>`, $${i}, `<member>`)
+            $$] : $$[
+                $${c.store}($$t, $${ptr::typed}($${c.pmember}($$ctype, self.`<p>`, $${i}), $${c.u8}) + $$off, `<member>`)
+            $$]
+
+            let getter-body = $$[
+                ($${type}($$t) == Class) ? $$t($$pmem) : $$mem
+            $$]
+
+            let setter-body = $$[
+                ($${type}($$t) == Class) ? die('not implemented') : $$store
+            $$]
+
+            getters.push(
+                ty.Func(
+                    name: name,
+                    params: [],
+                    body: getter-body,
+                    rt: ffi-type(t),
+                    decorators: []
+                )
+            )
+
+            setters.push(
+                ty.Func(
+                    name: name,
+                    params: [ty.Param(name: '<member>')],
+                    body: setter-body,
+                    rt: nil,
+                    decorators: []
+                )
+            )
+
+            fields.push($$[($${name}, *$${c.fields}($$ctype)[$${i}])$$])
+        }
+    }
+
+    fn member-size(decl: _) -> _ {
+        match decl {
+            Union(((ut: _), _))  => $$[$${c.size}($$ut)$$],
+            Struct((inner: _))   => inner.map(member-size).fold($$[0$$], (a, b) -> ty.Add(a, b)),
+            {t, count: nil, *}   => $$[$${c.size}($$t)$$],
+            (decl: _)            => $$[$${c.size}($$(decl.t)) * $$(decl.count)$$]
+        }
+    }
+
+    fn emit-decl(decl: _, i: Int, off: _) {
+        match decl {
+            Union(_, (decls: _)) => do {
+                for d in decls {
+                    emit-decl(d, i, off)
+                }
+            },
+            Struct((inner: _)) => do {
+                let cur-off = off
+                for field in inner {
+                    emit-decl(field, i, cur-off)
+                    cur-off = ty.Add(cur-off, member-size(field))
+                }
+            },
+            {name, t, count} => do {
+                add-member(i, name, t, count, off=off)
+            }
+        }
+    }
+
+    fn emit-top-level(member: _) {
+        match member {
+            Union(((ut: _), (decls: _))) => do {
+                let i = #structArgs
+                structArgs.push(ty.Arg(arg: ut))
+                for decl in decls {
+                    emit-decl(decl, i, $$[0$$])
+                }
+            },
+            Struct((inner: _)) => do {
+                for field in inner {
+                    emit-top-level(field)
+                }
+            },
+            {name, t, count} => do {
+                add-member(nil, name, t, count)
+            }
+        }
+    }
+
+    for member in members {
+        emit-top-level(member)
+    }
+
+    // FIXME
+    // print(structName)
+    // for arg in structArgs { match arg { ty.Arg({arg: ty.Cond(_, _, t), *}) => print(t), _ => print(arg) } }
+
+    let show = ty.Func(
+        name: '__str__',
+        params: [],
+        body: ty.Call(
+            func: ty.Value(prelude::str),
+            args: [
+                ty.Arg(
+                    arg: ty.Record([
+                        ty.RecordEntry(
+                            name: (#e).name,
+                            item: ty.MemberAccess(
+                                ty.Id(name: 'self'),
+                                (#e).name
+                            )
+                        )
+                        for e in getters
+                    ])
+                )
+            ]
+        )
+    )
+
+    let size = ty.Func(
+        name: '#',
+        params: [],
+        rt: $$[ $$::(Int) $$],
+        body: ty.Call(func: ty.Value(c.size), args: [ty.Arg(arg: ctype)])
+    )
+
+    let ctypeFunction = ty.Func(
+        name: 'ctype',
+        params: [],
+        body: ctype
+    )
+
+    ty.Multi([
+        ty.Let(
+            ctype,
+            ty.Cast(
+                ty.Call(
+                    func: ty.Value(c.struct),
+                    args: structArgs
+                ),
+                $$[ c::CType[$$(ty.Id({name: structName}))] $$]
+            )
+        ),
+        ty.Class(
+            name: structName,
+            public: pub?,
+            traits: [$$[$$::(IntoPtr)[_]$$]],
+            fields:  [ty.Id({name: '<p>', constraint: ty.Any})],
+            methods: [get, __ptr__, init, size, show, *methods],
+            getters: getters,
+            setters: setters,
+            static-methods: [ctypeFunction, size],
+            static-fields: [
+                ty.Assign(
+                    'fields',
+                    ty.Array([ty.ArrayItem(item: f) for f in fields])
+                )
+            ]
+        )
+    ])
+}
+
+fn clos() {
+    // closure
+    next()
+
+    let name = if peek().type == 'id' {
+        next().id
+    }
+
+    next!('(')
+
+    let params = []
+
+    while peek().type != ')' {
+        let name = next().id
+        // :
+        next()
+        let t = expr(0)
+        params.push({name, t})
+        if peek().type == ',' {
+            next()
+        }
+    }
+
+    next!(')')
+
+    let rt = (peek().type == '->')
+           ? do { next(); expr(0) }
+           : ty.Value(c.void)
+
+    let body = stmt(0)
+
+    let args = [rt, *params.map(&.t)]
+
+    let f = ty.Func(
+        name: name,
+        params: [ty.Param(name: name) for {name, *} in params],
+        body: body
+    )
+
+    let call = ty.Call(
+        func: ty.Cast(ty.Value(c.closure), ty.Any),
+        args: [
+            *(ty.Arg(arg: t) for t in args),
+            ty.Arg(arg: f)
+        ]
+    )
+    
+    match name {
+        nil => call,
+        _   => ty.Let(ty.Id({name}), call)
+    }
+}
+
+pub macro C! {
+    if 'fn' in [peek(it).?type for ..8] {
+        cfun()
+    } else if peek().?id == 'struct' || peek(1).?id == 'struct' {
+        strct()
+    } else if peek().?id == 'closure' {
+        clos()
+    } else {
+        fail('expected function or struct')
+    }
+}
+
+pub fn open(
+    lib: String | [String],
+    versions: Array[String | Int | nil] | nil = nil
+) -> Ptr[Any] | nil {
+    fn try-open(lib: String) {
+        for version in versions ?? [nil] {
+            let names = match version {
+#|if __apple__
+                $version => ["{lib}.{version}.dylib", "{lib}-{version}.dylib"],
+                _        => ["{lib}.dylib"]
+#|else if __windows__
+                $version => ["{lib}-{version}.dll", "{lib}.{version}.dll"],
+                _        => ["{lib}.dll"]
+#|else
+                $version => ["{lib}.so.{version}", "{lib}-{version}.so", "{lib}.{version}.so"],
+                _        => ["{lib}.so"]
+#|]
+            }
+            for name in names {
+                if let $handle = c.dlopen(name) {
+                    return handle
+                }
+            }
+        }
+    }
+
+    let libs = (lib :: String) ? [lib] : lib
+
+    for lib in libs {
+#|if !__windows__
+        if ('/' not in lib) && !lib.starts?('lib') {
+            lib = "lib{lib}"
+        }
+#|]
+
+#|if __apple__
+        if !lib.starts?('/') {
+            let dirs = [
+                '/opt/homebrew/lib',
+                '/opt/local/lib'
+                '/usr/local/lib',
+                '/usr/lib',
+            ]
+            for dir in dirs {
+                if let $handle = try-open("{dir}/{lib}") {
+                    return handle
+                }
+            }
+        }
+#|]
+        if let $handle = try-open(lib) {
+            return handle
+        }
+    }
+
+    let prog-dir = Module('main').path.comb(/\/[^\/]+$/)
+
+    return try-open("{prog-dir}/{lib}")
+}

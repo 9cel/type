@@ -1,0 +1,383 @@
+import ffi as c (C!)
+import errno (ENOTDIR)
+import thread
+
+__set_type__ argv Array[String];
+
+pub fn open(path: String, flags: Int, mode: ?Int) -> Int;
+pub fn close(fd: Int) -> Int;
+pub fn read(fd: Int, n: Int, all: Bool = false) -> Blob;
+pub fn read(fd: Int, buf: Blob, n: Int, all: Bool = false) -> Int;
+pub fn write(fd: Int, data: Any, all: Bool = false) -> Int;
+pub fn lseek(fd: Int, offset: Int, whence: Int) -> Int;
+pub fn pread(fd: Int, n: Int, offset: Int) -> Blob;
+pub fn pwrite(fd: Int, data: _, offset: Int) -> Int;
+
+pub fn wait(pid: Int = -1, options: Int = 0) -> (Int, Int) | nil;
+
+pub fn socket(domain: Int, type: Int, protocol: Int) -> Int;
+pub fn bind(sock: Int, addr: _) -> Int;
+pub fn connect(sock: Int, addr: _) -> Int;
+pub fn getsockname(sock: Int) -> Blob;
+pub fn getpeername(sock: Int) -> Blob;
+pub fn setsockopt(sock: Int, level: Int, opt: Int, val: Any) -> Int;
+pub fn getsockopt(sock: Int, level: Int, opt: Int) -> _;
+pub fn shutdown(sock: Int, how: Int) -> Int;
+pub fn getaddrinfo(
+    node: String | nil,
+    service: String | Int | nil,
+    domain: Int | nil,
+    type: Int | nil,
+    protocol: Int | nil,
+    flags: ?Int = 0,
+) -> Ok[Array[Blob]] | Err[Int];
+pub fn gai_strerror(errcode: Int) -> String;
+pub fn sendfile(
+    outfd: Int,
+    infd: Int,
+    offset: ?Int = nil,
+    count: ?Int = nil,
+    headers: ?Blob = nil,
+    trailers: ?Blob = nil,
+    flags: Int = 0
+) -> Int;
+
+/** file control. see fcntl(2) for details. */
+pub fn fcntl(fd: Int, cmd: Int, arg: ?Int = nil) -> Int;
+
+pub fn dup(fd: Int) -> Int;
+pub fn dup2(fd: Int, fd2: Int) -> Int;
+pub fn pipe() -> (Int, Int);
+#|if __linux__
+pub fn pipe2(flags: Int) -> (Int, Int);
+#|]
+pub fn socketpair(domain: Int, type: Int, protocol: Int) -> (Int, Int);
+pub fn splice(
+    fin: Int,
+    off_in: ?Int = nil,
+    fout: Int,
+    off_out: ?Int = nil,
+    len: Int,
+    flags: Int = 0
+) -> Int;
+
+pub fn umask(mask: Int) -> Int;
+pub fn chmod(path: String, mode: Int) -> Int;
+pub fn chown(path: String, owner: Int, group: Int) -> Int;
+pub fn fchmod(fd: Int, mode: Int) -> Int;
+pub fn fchown(fd: Int, owner: Int, group: Int) -> Int;
+pub fn ftruncate(path: String, size: Int) -> Int;
+pub fn truncate(path: String, size: Int) -> Int;
+
+pub use Stat = {
+    dev:     Int,
+    ino:     Int,
+    mode:    Int,
+    nlink:   Int,
+    uid:     Int,
+    gid:     Int,
+    rdev:    Int,
+    size:    Int,
+    atime:   Float,
+    mtime:   Float,
+    ctime:   Float,
+    blksize: Int,
+    blocks:  Int
+}
+
+pub fn stat(path: String) -> Stat | nil;
+pub fn fstat(fd: Int) -> Stat | nil;
+pub fn lstat(path: String) -> Stat | nil;
+
+pub fn opendir(path: String) -> Int | nil;
+pub fn readdir(dirp: Int) -> {ino: Int, off: Int, reclen: Int, type: Int, name: String} | nil;
+pub fn closedir(dirp: Int) -> Int;
+pub fn telldir(dirp: Int) -> Int;
+pub fn seekdir(dirp: Int, loc: Int);
+
+
+pub fn mktemp(pattern: String = 'tmp.XXXXXX') -> (Int, String);
+pub fn mkfifo(path: String, mode: ?Int) -> Int;
+
+pub fn accept(sock: Int) -> (Int, Blob);
+pub fn listen(sock: Int, n: Int) -> Int;
+
+pub fn poll[T](
+    pollfds: [Int | (Int, Int, ?T)],
+    timeout: Float | Int | nil
+) -> Ok[[(Int, Int, ?T)]] | Err[Int];
+
+pub fn poll[T](
+    pollfds-in: [Int | (Int, Int, T)],
+    pollfds-out: [(Int, Int, T)],
+    timeout: Float | Int | nil
+) -> Int;
+
+pub fn listdir(path: String) -> [Float] | nil;
+pub fn ncpu() -> Int;
+pub fn terminal-size(fd: ?Int) -> {rows: Int, cols: Int} | nil;
+
+pub use PTY = {
+    master: Int,
+    slave:  Int,
+    name:   String
+}
+
+pub fn openpty(size: ?(Int, Int) = nil) -> PTY | nil;
+
+pub use ProcessDescriptor = {
+    stdin: Int,
+    stdout: Int,
+    stderr: Int,
+    pid: Int
+}
+
+pub fn spawn(
+    cmd: Array[String],
+    stdin:  ?Int = nil,
+    stdout: ?Int = nil,
+    stderr: ?Int = nil,
+    chdir:  Int | Blob | String | nil = nil,
+    detach: Bool = false,
+    ctty:   ?{master: Int, slave: Int} = nil,
+) -> ProcessDescriptor;
+
+pub fn mprotect(addr: _, length: Int, prot: Int) -> Int;
+
+#|if __linux__
+pub fn eventfd(initval: Int, flags: ?Int) -> Int;
+pub fn inotify_init(flags: ?Int) -> Int;
+pub fn inotify_add_watch(fd: Int, path: String, mask: Int) -> Int;
+pub fn inotify_rm_watch(fd: Int, wd: Int) -> Int;
+pub fn signalfd(fd: Int, mask: _, flags: ?Int) -> Int;
+pub fn timerfd_create(clockid: Int, flags: ?Int) -> Int;
+pub fn timerfd_settime(fd: Int, flags: Int, initial: Float | Int, interval: ?Float | ?Int) -> Int;
+pub fn timerfd_gettime(fd: Int) -> (Float, Float) | nil;
+#|]
+
+pub class Signals : Iterable[Int] {
+    __set: _
+
+    init(*sigs) {
+        __set = sigset()
+        add(*sigs)
+    }
+
+    static __from(raw: _) -> _ {
+        let set = self()
+        set.__set = raw
+        set
+    }
+
+    static full -> Signals {
+        self().fill()
+    }
+
+    static pending -> Signals {
+        __from(sigpending())
+    }
+
+    static mask -> Signals {
+        __from(thread.sigmask())
+    }
+
+    static block(*sigs) -> Signals {
+        self(*sigs).block()
+    }
+
+    static suspend(*sigs) -> Signals {
+        self(*sigs).suspend()
+    }
+
+    static flush() {
+        pending.flush()
+    }
+
+    __ptr__() -> _ {
+        __set
+    }
+
+    add(*sigs) {
+        for sig in sigs {
+            sigaddset(__set, sig)
+        }
+        self
+    }
+
+    del(*sigs) {
+        for sig in sigs {
+            sigdelset(__set, sig)
+        }
+        self
+    }
+
+    clear() {
+        sigemptyset(__set)
+        self
+    }
+
+    fill() {
+        sigfillset(__set)
+        self
+    }
+
+    flip() {
+        for sig in 1..NSIG {
+            if sig in self {
+                sigdelset(__set, sig)
+            } else {
+                sigaddset(__set, sig)
+            }
+        }
+        self
+    }
+
+    flipped -> Signals {
+        let inverse = Signals()
+
+        for sig in 1..NSIG {
+            if sig not in self {
+                inverse.add(sig)
+            }
+        }
+
+        inverse
+    }
+
+    contains?(sig: _) -> Bool {
+        sigismember(__set, sig)
+    }
+
+    __str__() -> String {
+        let names: Array[String] = []
+
+        for sig in 1..NSIG {
+            if sig in self {
+                names.push(signame(sig))
+            }
+        }
+
+        "Signals({names.join(', ')})"
+    }
+
+    suspend() {
+        sigsuspend(__set)
+    }
+
+    wait() -> Int {
+        sigwait(__set)
+    }
+
+    set() {
+        __from(thread.sigmask(SIG_SETMASK, __set))
+    }
+
+    block() {
+        __from(thread.sigmask(SIG_BLOCK, __set))
+    }
+
+    unblock() {
+        __from(thread.sigmask(SIG_UNBLOCK, __set))
+    }
+
+    flush() {
+        for (;;) {
+            let set = pending.del(*flipped)
+
+            if #set == 0 {
+                break
+            }
+
+            set.wait()
+        }
+    }
+
+    #() -> Int {
+        let count = 0
+
+        for sig in 1..NSIG {
+            if sig in self {
+                count += 1
+            }
+        }
+
+        count
+    }
+
+    __iter__*() -> Generator[Int] {
+        for sig in 1..NSIG {
+            if sig in self {
+                yield sig
+            }
+        }
+    }
+}
+
+#|if __defined__(DT_DIR)
+pub fn walk*(path: String, skip: _ = nil, top: Bool = true) -> Generator[(String, [String], [String])] {
+    if not let $d = opendir(path) {
+        if top {
+            throw OSError('opendir()')
+        } else {
+            return
+        }
+    }
+
+    let fs: [String] = []
+    let ds: [String] = []
+
+    while let $entry = readdir(d) {
+        match (entry.type, entry.name) {
+            (_, '.'), (_, '..') => { },
+            (::DT_DIR, name)    => ds.push(entry.name),
+            (_,        name)    => fs.push(entry.name)
+        }
+    }
+
+    yield (path, ds, fs)
+
+    for d in ds {
+        let path = "{path}/{d}"
+        if !skip || !skip(path) {
+            yield *walk(path, skip, false)
+        }
+    }
+
+    closedir(d)
+}
+#|]
+
+#|if !__windows__
+pub ioctl: ({fd: Int, ioctl: Int, args: *_} -> Int) = c.wrapVar(nil, 'ioctl', 2, c.int, c.int, c.ulong);
+#|]
+
+pub fn rm(path, quiet=false) {
+    if not let $d = opendir(path) {
+        match errno.get() {
+            ::ENOTDIR => {
+                if unlink(path) == -1 && !quiet {
+                    throw Err(errno.get())
+                }
+            },
+
+            e => {
+                if !quiet throw Err(e)
+            }
+        }
+
+        return
+    }
+
+    try {
+        while let $entry = readdir(d) {
+            match (entry.type, entry.name) {
+                (_, '.'), (_, '..') => {},
+                (_, name)           => rm("{path}/{name}")
+            }
+        }
+    } finally {
+        closedir(d)
+    }
+
+    rmdir(path)
+}

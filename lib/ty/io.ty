@@ -1,0 +1,208 @@
+import os
+import errno
+import stdio
+
+pub const FBF = stdio._IOFBF
+pub const LBF = stdio._IOLBF
+pub const NBF = stdio._IONBF
+
+pub use BufferingMode = (typeof FBF) | (typeof LBF) | (typeof NBF)
+
+pub SEEK_SET = stdio.SEEK_SET
+pub SEEK_CUR = stdio.SEEK_CUR
+
+pub class Stream : Iter[String] {
+    __f: _
+    __fd: Int
+
+    init(fd, mode: ?String = 'a+', buffering: ?BufferingMode = nil, dup: Bool = false) {
+        if fd :: Int {
+            __fd = match dup { true => os.dup(fd), _ => fd }
+
+            if let $f = stdio.fdopen(__fd, mode) {
+                __f = f
+            } else {
+                if dup { os.close(__fd) }
+                throw os.OSError('open()')
+            }
+
+            if buffering != nil {
+                stdio.setvbuf(__f, buffering);
+            }
+        } else {
+            // fd is actually a file pointer
+            __f = fd
+        }
+    }
+
+    fd -> Int { __fd }
+
+    close() {
+        match __f ?: stdio.fclose(__f) {
+            0 => {
+                __f  = nil
+                __fd = -1
+            },
+
+            _ => throw os.OSError('close()', __f ? : errno.EBADF)
+        }
+    }
+
+    __enter__() {
+        self
+    }
+
+    __drop__() {
+        if __f != nil {
+            close()
+        }
+    }
+
+    tell() -> Int {
+        stdio.ftell(__f)
+    }
+
+    seek(*args) {
+        stdio.fseek(__f, *args)
+    }
+
+    nextLine() -> String | nil {
+        if let $line = stdio.fgets(__f) {
+            line
+        } else if stdio.fseek(__f, 0, stdio.SEEK_SET) == -1 {
+            stdio.clearerr(__f)
+        }
+    }
+
+    rewind() {
+        if stdio.fseek(__f, 0, stdio.SEEK_SET) == -1 {
+            throw os.OSError('rewind()')
+        }
+    }
+
+    next(n: Int, buf: ?Blob) -> Blob {
+        stdio.fread(__f, n, buf)
+    }
+
+    next() -> Int {
+        stdio.fgetc(__f)
+    }
+
+    write(s: Any) -> Int {
+        match s {
+            _ :: Blob | String => stdio.fwrite(__f, s),
+            _                  => stdio.fwrite(__f, str(s))
+        }
+    }
+
+    writeSigned(*args) {
+        stdio.writeSigned(__f, *args)
+    }
+
+    writeUnsigned(*args) {
+        stdio.writeUnsigned(__f, *args)
+    }
+
+    writeFloat(*args) {
+        stdio.writeFloat(__f, *args)
+    }
+
+    writeDouble(*args) {
+        stdio.writeDouble(__f, *args)
+    }
+
+    putc(c: Int) {
+        stdio.fputc(__f, c)
+    }
+
+    nextFloat() -> Float {
+        stdio.readFloat(__f)
+    }
+
+    nextDouble() -> Float {
+        stdio.readDouble(__f)
+    }
+
+    nextUnsigned(*args) -> Int {
+        stdio.readUnsigned(__f, *args)
+    }
+
+    nextSigned(*args) -> Int {
+        stdio.readUnsigned(__f, *args)
+    }
+
+    print(s = '') {
+        match s {
+            _ :: Blob   => stdio.puts(__f, s),
+            _ :: String => stdio.puts(__f, s),
+            _           => stdio.puts(__f, str(s))
+        }
+    }
+
+    slurp() -> String {
+        stdio.slurp(__f)
+    }
+
+    blob(bs=1024) -> Blob {
+        let b = ::blob()
+
+        while stdio.fread(__f, bs, b) > 0 {
+            ;
+        }
+
+        return b
+    }
+
+    flush() {
+        stdio.fflush(__f)
+    }
+
+    __next__() {
+        Some.from(nextLine())
+    }
+}
+
+pub stdin = Stream(0, 'r');
+pub stdout = Stream(1, 'w');
+pub stderr = Stream(2, 'w', NBF);
+
+pub function open(
+    path: String | Int,
+    mode: String = 'a+',
+    buffering: ?BufferingMode = nil,
+    dup: Bool = false
+) {
+    if path :: Int {
+        return Stream(path, mode, buffering, dup);
+    }
+
+    let flags = match mode {
+        'r'  => os.O_RDONLY,
+        'w'  => os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        'wx' => os.O_WRONLY | os.O_CREAT,
+        'a'  => os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+        'r+' => os.O_RDWR,
+        'w+' => os.O_RDWR | os.O_CREAT | os.O_TRUNC,
+        'a+' => os.O_RDWR | os.O_CREAT | os.O_APPEND,
+        _    => throw ValueError("invalid mode: {mode}")
+    };
+
+    let fd = if flags & os.O_CREAT {
+        os.open(path, flags, 0o644)
+    } else {
+        os.open(path, flags)
+    }
+
+    match fd {
+        -1  => throw os.OSError('open()'),
+        _   => Stream(fd, mode, buffering)
+    }
+}
+
+pub function tmpfile() {
+    if not let $f = stdio.tmpfile() {
+        throw os.OSError('tmpfile()')
+    } else {
+        Stream(f)
+    }
+}

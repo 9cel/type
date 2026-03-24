@@ -1,0 +1,268 @@
+pub import llhttp (..)
+import os (..)
+import json
+import errno
+import net
+import log
+import time
+
+const READ_CHUNK_SIZE = (1 << 14) // 16 KiB
+
+fn make-pattern(route: String) -> (Array[String], RegexV) {
+    let route   = route.sub(/<(\w+)>/, [_, name] -> "<{name}:\\w+>")
+    let params  = route.scan(/<(\w+):/).map(&1)
+    let pattern = route.sub(/<\w+:(.*?)>/, [_, pattern] -> "({pattern})")
+    (params, regex("^{pattern}/?$", 'v'))
+}
+
+pub class HttpResponse {
+    statusCode: Int
+    body:       Blob
+    headers:    Dict[String, String]
+
+    init() {
+        statusCode = HTTP_STATUS_OK
+        body = Blob()
+        headers = %{'Content-Type': 'text/html'}
+    }
+
+    header(k, v) {
+        if v == nil {
+            headers[k]
+        } else {
+            headers[k] = "{v}"
+        }
+    }
+
+    status(c) {
+        statusCode = (c ?? statusCode)
+    }
+
+    write(s) {
+        body.push(s)
+    }
+
+    json(x) {
+        body.push(json::encode(x))
+        header('Content-Type', 'application/json')
+    }
+
+    plain(x) {
+        body.push("{x}")
+        header('Content-Type', 'text/plain')
+    }
+
+    send(c) {
+        let response = Blob([
+            "HTTP/1.1 {statusCode} {statusName(statusCode)}",
+            "Content-Length: {#body}",
+            *["{k}: {v}" for k, v in headers],
+            '',
+            ''
+        ].join('\r\n'))
+
+        response.push(body)
+
+        ::write(c, response, all=true)
+    }
+}
+
+use RequestHandler = {req: HttpRequest, rsp: HttpResponse, params: *_} -> Int;
+
+use RouteMap = Dict[
+    String,
+    Array[{
+        route: String,
+        params: Array[String],
+        pattern: RegexV,
+        fun: RequestHandler
+    }]
+];
+
+pub class HttpServer {
+    __sock:     Int
+    __conns:    Array[HttpConnection]
+    __free:     Array[HttpConnection]
+    __stopping: Bool
+    __threads:  Array[Thread[_]]
+    __queue:    SharedQueue[(Int, HttpRequest)]
+    __ev-r:     Int
+    __ev-w:     Int
+    __handlers: RouteMap = %{*: []}
+
+    init(*args, backlog: Int = 128) {
+        __conns    = []
+        __free     = []
+        __stopping = false
+        __queue    = SharedQueue()
+        (__ev-r, __ev-w) = pipe()
+
+        match args {
+            [addr: String, port: Int] => {
+                __sock = net::listen('tcp', "{addr}:{port}", backlog)
+            },
+
+            [sock: Int] => {
+                __sock = sock
+                listen(__sock, backlog)
+            }
+        }
+
+        __threads = [Thread(__thread) for ..ncpu()]
+    }
+
+    address -> (String, String) {
+        getnameinfo(
+            getsockname(__sock),
+            NI_NUMERICHOST | NI_NUMERICSERV
+        )
+    }
+
+    __resolve(
+        method: String,
+        url: String
+    ) -> (RequestHandler, Dict[String, String]) | nil {
+        if not let $handlers = __handlers[method] {
+            return nil
+        }
+
+        for {params, pattern, fun, *} in handlers {
+            if let $m = url.match(pattern) {
+                return (fun, %{params[it]: m[it + 1]! for ..#params})
+            }
+        }
+    }
+
+    stop() { __stopping = true }
+
+    __install(method: String, route: String, fun: RequestHandler) {
+        let (params, pattern) = make-pattern(route)
+        let handlers = __handlers[method]
+        handlers.push({route, params, pattern, fun})
+        handlers.sort!(by=\-(_.route.search('<') ?? 99999))
+    }
+
+    get(f, route) {
+        __install('GET', route, f)
+        f
+    }
+
+    post(f, route) {
+        __install('POST', route, f)
+        f
+    }
+
+    delete(f, route) {
+        __install('DELETE', route, f)
+        f
+    }
+
+    put(f, route) {
+        __install('PUT', route, f)
+        f
+    }
+
+    __new-conn(sock: Int, addr: String, port: Int) -> HttpConnection {
+        if let Some(conn) = __free.try-pop() {
+            conn.reset(sock, addr, port)
+        } else {
+            HttpConnection(sock, addr, port)
+        }
+    }
+
+    __go(fd: Int, req: HttpRequest) {
+        let rsp = HttpResponse()
+
+        if let (f, ps) = __resolve(req.method, req.url) {
+            try {
+                rsp.status(f(req, rsp, **ps) ?? 200)
+            } catch e {
+                log::error!("Exception while handling {req.method} {req.url}: {e}\n{e.trace()}")
+                rsp.plain("Exception: {e}\n\nBacktrace:\n{str(e.trace())}")
+                rsp.status(500)
+            }
+        } else {
+            rsp.status(404)
+        }
+
+        rsp.send(fd)
+        req.end()
+
+        write(__ev-w, 'x')
+    }
+
+    __thread() {
+        catch _: CanceledError {
+            return
+        }
+
+        while let (fd, req) = __queue.take() {
+            __go(fd, req)
+        }
+    }
+
+    run() {
+        let polling = [__sock, __ev-r]
+        let events  = []
+        let buf     = Blob()
+
+        while !__stopping {
+            polling.take!(2)
+
+            for __conns if !it.busy? {
+                polling.push((it.fd, POLLIN, it))
+            }
+
+            let n = poll(polling, events, -1)
+            if n<= 0 {
+                log::warn!("poll(): {errno.str()}")
+                continue
+            }
+
+            for match events {
+                (self.__sock, POLLIN) => {
+                    if let (conn, addr) = accept(__sock) {
+                        let (addr, port) = getnameinfo(addr, NI_NUMERICHOST | NI_NUMERICSERV)
+                        __conns.push(__new-conn(conn, addr, port))
+                        log::debug!("New connection from {addr}:{port} on fd={conn} ({#__conns} active)")
+                    } else {
+                        log::warn!("accept(): {errno.str()}")
+                    }
+                },
+
+                (self.__ev-r, POLLIN) => {
+                    read(__ev-r, buf, READ_CHUNK_SIZE)
+                    buf.clear()
+                },
+
+                (fd, ev, c) => {
+                    if (ev & POLLIN) && read(fd, buf, READ_CHUNK_SIZE) > 0 {
+                        match c.push(buf) {
+                            Ok($req) => __queue.put((fd, req)),
+                            Err(_)   => shutdown(fd, SHUT_RD),
+                            _        => {}
+                        }
+                        buf.clear()
+                    } else {
+                        close(fd)
+                        __free.push(c)
+                        __conns.remove!(c)
+                    }
+                },
+
+                (fd, ev, *) => {
+                    log::warn!("Unexpected poll event {ev} on fd={fd}")
+                }
+            }
+        }
+
+        __queue.close()
+        
+        for __threads {
+            it.join()
+        }
+
+        close(__ev-r)
+        close(__ev-w)
+    }
+}

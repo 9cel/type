@@ -1,0 +1,153 @@
+import os
+import time (now)
+import errno (ETIMEDOUT, EINTR)
+
+#|if __windows__
+const SHELL = ['cmd.exe', '/c']
+#|else
+const SHELL = ['/bin/sh', '-c']
+#|]
+
+pub use CmdResult = {
+    status: Int,
+    signal: Int | nil,
+    stdout: String,
+    stderr: String
+}
+
+pub fn sh(
+    cmd: String,
+    input: Blob | String | nil = nil,
+    timeoutMs: Int | nil = nil,
+    signal: Int = os.SIGTERM,
+    combineOutput: Bool = false,
+    shareStderr: Bool = false,
+    chdir: Int | String | Blob | nil = nil,
+    shell: Array[String] = SHELL
+) -> nil | |String, CmdResult| {
+    let stderr = combineOutput ? os.SPAWN_MERGED_STDERR
+               : shareStderr   ? os.SPAWN_INHERIT
+               :                 os.SPAWN_PIPE
+    let stdin = (input != nil) ? os.SPAWN_PIPE : os.SPAWN_NULL
+
+    if not let $p = os.spawn(
+        [*shell, cmd if cmd],
+        stdin=stdin,
+        stdout=os.SPAWN_PIPE,
+        stderr=stderr,
+        chdir=chdir,
+        detach=timeoutMs != nil
+    ) {
+          return nil
+    }
+
+    let out = Blob()
+    let err = Blob()
+
+    if input != nil {
+        os.write(p.stdin, input)
+        os.close(p.stdin)
+    }
+
+    let deadline = match timeoutMs {
+        -1 or nil => nil,
+        n         => now() + (n / 1.0e3)
+    }
+
+    let timedOut = false
+
+    let pfds-in = [
+        (p.stdout, os::POLLIN, out),
+        (p.stderr, os::POLLIN, err) if p.stderr != p.stdout
+    ]
+    let pfds-out = []
+
+#|if __apple__ || __linux__ || __bsd__
+    for (;;) {
+        let timeout = deadline ?: (deadline - now())
+
+        if timeout && timeout <= 1.0e-3 {
+            os.kill(-p.pid, signal)
+            timedOut = true
+            break
+        }
+
+        let n = os.poll(pfds-in, pfds-out, timeout)
+
+        continue if (n == 0) || (n == EINTR)
+
+        let stop = (n < 0)
+
+        for (fd, ev, buf) in pfds-out {
+            if ev & os.POLLIN {
+                os.read(fd, buf, 4096)
+            }
+            if ev & (os.POLLERR | os.POLLHUP) {
+                stop = true
+            }
+        }
+
+        break if stop
+    }
+
+    os.close(p.stdout)
+    if p.stderr != p.stdout {
+        os.close(p.stderr)
+    }
+
+    let (_, status) = os.wait(p.pid)!
+
+    if timedOut {
+        return nil
+    }
+
+    let out = out.str!()
+
+    return out, {
+        signal: os.WIFSIGNALED(status) ? os.WTERMSIG(status) : nil,
+        stdout: out,
+        status: os.WEXITSTATUS(status),
+        stderr: err.str!()
+    }
+#|else
+    let stdoutThread = Thread(-> do {
+        while let $data = os.read(p.stdout, 4096) {
+            out.push(data)
+        }
+    })
+
+    let stderrThread = Thread(-> do {
+        while let $data = os.read(p.stderr, 4096) {
+            err.push(data)
+        }
+    })
+
+    if timeoutMs == nil {
+        stdoutThread.join()
+        stderrThread.join()
+    } else {
+        let start = utime()
+
+        if not let Some(_) = stdoutThread.join(remainingMs) {
+            return nil
+        }
+
+        remainingMs -= (utime() - start) / 1000
+
+        if not let Some(_) = stderrThread.join(max(0, remainingMs)) {
+            return nil
+        }
+
+    }
+
+    return out.str!()
+#|]
+}
+
+pub function ls(d, flags) {
+    return sh("ls '{d}' {flags || ''}").split("\n")
+}
+
+pub function expand(s) {
+    return sh("echo -n {s}")
+}

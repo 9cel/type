@@ -1,0 +1,774 @@
+import ffi as c (C!)
+import os
+import time
+import path (Path)
+
+ns limits {
+    const MAX_HEADERS   = 256
+    const MAX_DATA_SIZE = (1024 * 1024 * 8)
+}
+
+pub const HTTP_BOTH      = 0
+pub const HTTP_REQUEST   = 1
+pub const HTTP_RESPONSE  = 2
+
+pub const F_CONNECTION_KEEP_ALIVE = 0x1
+pub const F_CONNECTION_CLOSE = 0x2
+pub const F_CONNECTION_UPGRADE = 0x4
+pub const F_CHUNKED = 0x8
+pub const F_UPGRADE = 0x10
+pub const F_CONTENT_LENGTH = 0x20
+pub const F_SKIPBODY = 0x40
+pub const F_TRAILING = 0x80
+pub const F_TRANSFER_ENCODING = 0x200
+
+pub const HTTP_DELETE = 0
+pub const HTTP_GET = 1
+pub const HTTP_HEAD = 2
+pub const HTTP_POST = 3
+pub const HTTP_PUT = 4
+pub const HTTP_CONNECT = 5
+pub const HTTP_OPTIONS = 6
+pub const HTTP_TRACE = 7
+pub const HTTP_COPY = 8
+pub const HTTP_LOCK = 9
+pub const HTTP_MKCOL = 10
+pub const HTTP_MOVE = 11
+pub const HTTP_PROPFIND = 12
+pub const HTTP_PROPPATCH = 13
+pub const HTTP_SEARCH = 14
+pub const HTTP_UNLOCK = 15
+pub const HTTP_BIND = 16
+pub const HTTP_REBIND = 17
+pub const HTTP_UNBIND = 18
+pub const HTTP_ACL = 19
+pub const HTTP_REPORT = 20
+pub const HTTP_MKACTIVITY = 21
+pub const HTTP_CHECKOUT = 22
+pub const HTTP_MERGE = 23
+pub const HTTP_MSEARCH = 24
+pub const HTTP_NOTIFY = 25
+pub const HTTP_SUBSCRIBE = 26
+pub const HTTP_UNSUBSCRIBE = 27
+pub const HTTP_PATCH = 28
+pub const HTTP_PURGE = 29
+pub const HTTP_MKCALENDAR = 30
+pub const HTTP_LINK = 31
+pub const HTTP_UNLINK = 32
+pub const HTTP_SOURCE = 33
+pub const HTTP_PRI = 34
+pub const HTTP_DESCRIBE = 35
+pub const HTTP_ANNOUNCE = 36
+pub const HTTP_SETUP = 37
+pub const HTTP_PLAY = 38
+pub const HTTP_PAUSE = 39
+pub const HTTP_TEARDOWN = 40
+pub const HTTP_GET_PARAMETER = 41
+pub const HTTP_SET_PARAMETER = 42
+pub const HTTP_REDIRECT = 43
+pub const HTTP_RECORD = 44
+pub const HTTP_FLUSH = 45
+
+pub const HPE_OK = 0
+pub const HPE_INTERNAL = 1
+pub const HPE_STRICT = 2
+pub const HPE_LF_EXPECTED = 3
+pub const HPE_UNEXPECTED_CONTENT_LENGTH = 4
+pub const HPE_CLOSED_CONNECTION = 5
+pub const HPE_INVALID_METHOD = 6
+pub const HPE_INVALID_URL = 7
+pub const HPE_INVALID_CONSTANT = 8
+pub const HPE_INVALID_VERSION = 9
+pub const HPE_INVALID_HEADER_TOKEN = 10
+pub const HPE_INVALID_CONTENT_LENGTH = 11
+pub const HPE_INVALID_CHUNK_SIZE = 12
+pub const HPE_INVALID_STATUS = 13
+pub const HPE_INVALID_EOF_STATE = 14
+pub const HPE_INVALID_TRANSFER_ENCODING = 15
+pub const HPE_CB_MESSAGE_BEGIN = 16
+pub const HPE_CB_HEADERS_COMPLETE = 17
+pub const HPE_CB_MESSAGE_COMPLETE = 18
+pub const HPE_CB_CHUNK_HEADER = 19
+pub const HPE_CB_CHUNK_COMPLETE = 20
+pub const HPE_PAUSED = 21
+pub const HPE_PAUSED_UPGRADE = 22
+pub const HPE_PAUSED_H2_UPGRADE = 23
+pub const HPE_USER = 24
+
+pub const HTTP_STATUS_CONTINUE = 100
+pub const HTTP_STATUS_SWITCHING_PROTOCOLS = 101
+pub const HTTP_STATUS_PROCESSING = 102
+pub const HTTP_STATUS_EARLY_HINTS = 103
+pub const HTTP_STATUS_RESPONSE_IS_STALE = 110
+pub const HTTP_STATUS_REVALIDATION_FAILED = 111
+pub const HTTP_STATUS_DISCONNECTED_OPERATION = 112
+pub const HTTP_STATUS_HEURISTIC_EXPIRATION = 113
+pub const HTTP_STATUS_MISCELLANEOUS_WARNING = 199
+pub const HTTP_STATUS_OK = 200
+pub const HTTP_STATUS_CREATED = 201
+pub const HTTP_STATUS_ACCEPTED = 202
+pub const HTTP_STATUS_NON_AUTHORITATIVE_INFORMATION = 203
+pub const HTTP_STATUS_NO_CONTENT = 204
+pub const HTTP_STATUS_RESET_CONTENT = 205
+pub const HTTP_STATUS_PARTIAL_CONTENT = 206
+pub const HTTP_STATUS_MULTI_STATUS = 207
+pub const HTTP_STATUS_ALREADY_REPORTED = 208
+pub const HTTP_STATUS_TRANSFORMATION_APPLIED = 214
+pub const HTTP_STATUS_IM_USED = 226
+pub const HTTP_STATUS_MISCELLANEOUS_PERSISTENT_WARNING = 299
+pub const HTTP_STATUS_MULTIPLE_CHOICES = 300
+pub const HTTP_STATUS_MOVED_PERMANENTLY = 301
+pub const HTTP_STATUS_FOUND = 302
+pub const HTTP_STATUS_SEE_OTHER = 303
+pub const HTTP_STATUS_NOT_MODIFIED = 304
+pub const HTTP_STATUS_USE_PROXY = 305
+pub const HTTP_STATUS_SWITCH_PROXY = 306
+pub const HTTP_STATUS_TEMPORARY_REDIRECT = 307
+pub const HTTP_STATUS_PERMANENT_REDIRECT = 308
+pub const HTTP_STATUS_BAD_REQUEST = 400
+pub const HTTP_STATUS_UNAUTHORIZED = 401
+pub const HTTP_STATUS_PAYMENT_REQUIRED = 402
+pub const HTTP_STATUS_FORBIDDEN = 403
+pub const HTTP_STATUS_NOT_FOUND = 404
+pub const HTTP_STATUS_METHOD_NOT_ALLOWED = 405
+pub const HTTP_STATUS_NOT_ACCEPTABLE = 406
+pub const HTTP_STATUS_PROXY_AUTHENTICATION_REQUIRED = 407
+pub const HTTP_STATUS_REQUEST_TIMEOUT = 408
+pub const HTTP_STATUS_CONFLICT = 409
+pub const HTTP_STATUS_GONE = 410
+pub const HTTP_STATUS_LENGTH_REQUIRED = 411
+pub const HTTP_STATUS_PRECONDITION_FAILED = 412
+pub const HTTP_STATUS_PAYLOAD_TOO_LARGE = 413
+pub const HTTP_STATUS_URI_TOO_LONG = 414
+pub const HTTP_STATUS_UNSUPPORTED_MEDIA_TYPE = 415
+pub const HTTP_STATUS_RANGE_NOT_SATISFIABLE = 416
+pub const HTTP_STATUS_EXPECTATION_FAILED = 417
+pub const HTTP_STATUS_IM_A_TEAPOT = 418
+pub const HTTP_STATUS_PAGE_EXPIRED = 419
+pub const HTTP_STATUS_ENHANCE_YOUR_CALM = 420
+pub const HTTP_STATUS_MISDIRECTED_REQUEST = 421
+pub const HTTP_STATUS_UNPROCESSABLE_ENTITY = 422
+pub const HTTP_STATUS_LOCKED = 423
+pub const HTTP_STATUS_FAILED_DEPENDENCY = 424
+pub const HTTP_STATUS_TOO_EARLY = 425
+pub const HTTP_STATUS_UPGRADE_REQUIRED = 426
+pub const HTTP_STATUS_PRECONDITION_REQUIRED = 428
+pub const HTTP_STATUS_TOO_MANY_REQUESTS = 429
+pub const HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE_UNOFFICIAL = 430
+pub const HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE = 431
+pub const HTTP_STATUS_LOGIN_TIMEOUT = 440
+pub const HTTP_STATUS_NO_RESPONSE = 444
+pub const HTTP_STATUS_RETRY_WITH = 449
+pub const HTTP_STATUS_BLOCKED_BY_PARENTAL_CONTROL = 450
+pub const HTTP_STATUS_UNAVAILABLE_FOR_LEGAL_REASONS = 451
+pub const HTTP_STATUS_CLIENT_CLOSED_LOAD_BALANCED_REQUEST = 460
+pub const HTTP_STATUS_INVALID_X_FORWARDED_FOR = 463
+pub const HTTP_STATUS_REQUEST_HEADER_TOO_LARGE = 494
+pub const HTTP_STATUS_SSL_CERTIFICATE_ERROR = 495
+pub const HTTP_STATUS_SSL_CERTIFICATE_REQUIRED = 496
+pub const HTTP_STATUS_HTTP_REQUEST_SENT_TO_HTTPS_PORT = 497
+pub const HTTP_STATUS_INVALID_TOKEN = 498
+pub const HTTP_STATUS_CLIENT_CLOSED_REQUEST = 499
+pub const HTTP_STATUS_INTERNAL_SERVER_ERROR = 500
+pub const HTTP_STATUS_NOT_IMPLEMENTED = 501
+pub const HTTP_STATUS_BAD_GATEWAY = 502
+pub const HTTP_STATUS_SERVICE_UNAVAILABLE = 503
+pub const HTTP_STATUS_GATEWAY_TIMEOUT = 504
+pub const HTTP_STATUS_HTTP_VERSION_NOT_SUPPORTED = 505
+pub const HTTP_STATUS_VARIANT_ALSO_NEGOTIATES = 506
+pub const HTTP_STATUS_INSUFFICIENT_STORAGE = 507
+pub const HTTP_STATUS_LOOP_DETECTED = 508
+pub const HTTP_STATUS_BANDWIDTH_LIMIT_EXCEEDED = 509
+pub const HTTP_STATUS_NOT_EXTENDED = 510
+pub const HTTP_STATUS_NETWORK_AUTHENTICATION_REQUIRED = 511
+pub const HTTP_STATUS_WEB_SERVER_UNKNOWN_ERROR = 520
+pub const HTTP_STATUS_WEB_SERVER_IS_DOWN = 521
+pub const HTTP_STATUS_CONNECTION_TIMEOUT = 522
+pub const HTTP_STATUS_ORIGIN_IS_UNREACHABLE = 523
+pub const HTTP_STATUS_TIMEOUT_OCCURED = 524
+pub const HTTP_STATUS_SSL_HANDSHAKE_FAILED = 525
+pub const HTTP_STATUS_INVALID_SSL_CERTIFICATE = 526
+pub const HTTP_STATUS_RAILGUN_ERROR = 527
+pub const HTTP_STATUS_SITE_IS_OVERLOADED = 529
+pub const HTTP_STATUS_SITE_IS_FROZEN = 530
+pub const HTTP_STATUS_IDENTITY_PROVIDER_AUTHENTICATION_ERROR = 561
+pub const HTTP_STATUS_NETWORK_READ_TIMEOUT = 598
+pub const HTTP_STATUS_NETWORK_CONNECT_TIMEOUT = 599
+
+if not let $llhttp = c.open('llhttp') {
+    throw "failed to load llhttp shared library"
+}
+
+const llhttp_cb      = c.ptr
+const llhttp_data_cb = c.ptr
+const llhttp_type    = c.int
+
+C! struct llhttp_internal {
+  int32_t _index;
+  void* _span_pos0;
+  void* _span_cb0;
+  int32_t error;
+  const char* reason;
+  const char* error_pos;
+  void* data;
+  void* _current;
+  uint64_t content_length;
+  uint8_t type;
+  uint8_t method;
+  uint8_t http_major;
+  uint8_t http_minor;
+  uint8_t header_state;
+  uint16_t lenient_flags;
+  uint8_t upgrade;
+  uint8_t finish;
+  uint16_t flags;
+  uint16_t status_code;
+  uint8_t initial_message_completed;
+  void* settings;
+};
+
+C! struct llhttp_settings {
+  /* Possible return values 0, -1, `HPE_PAUSED` */
+  llhttp_cb      on_message_begin;
+
+  /* Possible return values 0, -1, HPE_USER */
+  llhttp_data_cb on_protocol;
+  llhttp_data_cb on_url;
+  llhttp_data_cb on_status;
+  llhttp_data_cb on_method;
+  llhttp_data_cb on_version;
+  llhttp_data_cb on_header_field;
+  llhttp_data_cb on_header_value;
+  llhttp_data_cb on_chunk_extension_name;
+  llhttp_data_cb on_chunk_extension_value;
+
+  /* Possible return values:
+   * 0  - Proceed normally
+   * 1  - Assume that request/response has no body, and proceed to parsing the
+   *      next message
+   * 2  - Assume absence of body (as above) and make `llhttp_execute()` return
+   *      `HPE_PAUSED_UPGRADE`
+   * -1 - Error
+   * `HPE_PAUSED`
+   */
+  llhttp_cb on_headers_complete;
+
+  /* Possible return values 0, -1, HPE_USER */
+  llhttp_data_cb on_body;
+
+  /* Possible return values 0, -1, `HPE_PAUSED` */
+  llhttp_cb on_message_complete;
+  llhttp_cb on_protocol_complete;
+  llhttp_cb on_url_complete;
+  llhttp_cb on_status_complete;
+  llhttp_cb on_method_complete;
+  llhttp_cb on_version_complete;
+  llhttp_cb on_header_field_complete;
+  llhttp_cb on_header_value_complete;
+  llhttp_cb on_chunk_extension_name_complete;
+  llhttp_cb on_chunk_extension_value_complete;
+
+  /* When on_chunk_header is called, the current chunk length is stored
+   * in parser->content_length.
+   * Possible return values 0, -1, `HPE_PAUSED`
+   */
+  llhttp_cb on_chunk_header;
+  llhttp_cb on_chunk_complete;
+  llhttp_cb on_reset;
+};
+
+C! pub llhttp fn {
+    void llhttp_init(llhttp_t *parser, int type, struct llhttp_settings_t *settings);
+    void llhttp_reset(llhttp_t *parser);
+    void llhttp_settings_init(struct llhttp_settings_t *settings);
+    int llhttp_execute(llhttp_t *parser, const char *data, c.u64 len);
+    void llhttp_resume(llhttp_t *parser);
+    const char *llhttp_method_name(int method);
+    const char *llhttp_status_name(int status);
+    const char *llhttp_errno_name(int err);
+    const char *llhttp_get_error_reason(llhttp_t *parser);
+    const char *llhttp_get_error_pos(llhttp_t *parser);
+    uint8_t llhttp_get_method(llhttp_t *parser);
+    int llhttp_get_status_code(llhttp_t *parser);
+    uint8_t llhttp_get_http_major(llhttp_t *parser);
+    uint8_t llhttp_get_http_minor(llhttp_t *parser);
+}
+
+fn llhttp_get_version(parser) -> HttpVersion {
+    return {
+        major: llhttp_get_http_major(parser),
+        minor: llhttp_get_http_minor(parser)
+    }
+}
+
+let printData = (parser, data, len) -> do {
+    return 0
+}
+
+let onHeaderField = (parser, data, len) -> do {
+}
+
+pub use HttpHeaders = Dict[String, String | [String]]
+pub use HttpStatus  = {code: Int, text: String}
+pub use HttpVersion = {major: Int, minor: Int}
+
+tag MultipartData;
+tag MultipartMore;
+tag MultipartError;
+
+fn multipart*(boundary: String) {
+    let files = %{}
+    let form  = %{}
+    let buf   = Blob()
+
+    let separator = "\r\n--{boundary}"
+    let initial   = separator + 2
+
+    let name     = nil
+    let data     = nil
+    let ^file    = nil
+    let path     = nil
+    let filename = nil
+    let mime     = nil
+
+    fn commit(chunk: Blob) {
+        if file != nil {
+            file.write(chunk)
+        } else if data != nil {
+            data.push(chunk)
+        } else if #chunk != 0 {
+            yield MultipartError
+        }
+    }
+
+    fn next-line() -> _ {
+        for (;;) {
+            while #buf < 2 {
+                buf.push(yield MultipartMore)
+            }
+            if let $i = buf.search('\r\n') {
+                let line = buf.splice(0, i + 2).str!().trim()
+                return line ?: line
+            } else {
+                commit(buf.splice(0, max(0, #buf - 2)))
+            }
+        }
+    }
+
+    fn seek(token) -> _ {
+        let size = token.size()
+        for (;;) {
+            while #buf < size + 2 {
+                buf.push(yield MultipartMore)
+            }
+            if let $i = buf.search(token) {
+                commit(buf.splice(0, i))
+                let end = buf.str!(size, 2)
+                buf.clear(0, size + 2)
+                return end
+            } else {
+                commit(buf.splice(0, #buf - size))
+            }
+        }
+    }
+
+    fn part() {
+        while let $line = next-line() {
+            if not let [k, v] = line.split(': ', 1) {
+                yield MultipartError
+            }
+            match k.lower() {
+                'content-disposition' => {
+                    let disposition = %{k: v for [_, k, v] in v.scan(/(\w+)="([^"]+)"/)}
+
+                    name     = disposition['name']
+                    filename = disposition['filename']
+
+                    if name == nil {
+                        yield MultipartError
+                    }
+
+                    if filename != nil {
+                        path = Path('/tmp').mktemp('upload')
+                        file = path.open('w+')
+                    } else {
+                        data = Blob()
+                    }
+                },
+
+                'content-type' => {
+                    mime = v
+                },
+
+                _ => {
+                    yield MultipartError
+                }
+            }
+        }
+
+        let end = seek(separator)
+
+        if file != nil {
+            file.close()
+            files[name] = {
+                name:     filename,
+                type:     mime,
+                path:     path
+            }
+            file     = nil
+            filename = nil
+            path     = nil
+            mime     = nil
+            name     = nil
+        } else {
+            form[name] = data.str!()
+            data       = nil
+            name       = nil
+        }
+
+        end != '--'
+    }
+
+    if seek(initial) != '--' {
+        while part() {
+            ;
+        }
+    }
+    
+    yield MultipartData(form, files)
+}
+
+pub fn urldecode(s: String) -> String {
+    s.sub('+', ' ')
+     .sub(/%[[:xdigit:]]{2}/, \chr(int(_[1;], 16)))
+     .sub("\r\n", "\n")
+     .sub("\r", "\n")
+}
+
+pub fn decode-query(query: String) -> Dict[String, String | Array[String] | nil] {
+    let params = %{}
+
+    for [k, ?v] in query.split('&').map(p -> p.split('=', 1).map!(urldecode)) {
+        match params[k] {
+            nil         => { params[k] = v        },
+            one: String => { params[k] = [one, v] },
+            many        => { many.push(v)         }
+        }
+    }
+
+    params
+}
+
+pub class HttpRequest {
+    __conn:    HttpConnection
+
+    method:    String
+    url:       String
+    version:   HttpVersion
+    headers:   HttpHeaders
+    params:    Dict[String, String | [String] | nil]
+    files:     Dict[String, _]
+    body:      String | nil
+    finished:  Bool
+
+    init(conn: HttpConnection) {
+        __conn   = conn
+        headers  = %{}
+        files    = %{}
+        params   = %{}
+        finished = false
+    }
+
+    begin() {
+        (url, params) = match url.split('?', 1) {
+            [path]          => (path, params),
+            [path, query]   => (path, params + decode-query(query))
+        }
+        if headers['Content-Type'] == 'application/x-www-form-urlencoded' {
+            if body != nil {
+                params.update(decode-query(body))
+            }
+        }
+    }
+
+    end() {
+        __conn.resume()
+    }
+}
+
+ns states {
+    const STARTED      = 0
+    const HAVE_HEADERS = 1 
+    const WAIT_BODY    = 2
+    const MULTIPART    = 3
+    const FINISHED     = 4
+}
+
+let ALWAYS_BUFFER = %{
+    'application/json',
+    'application/xml',
+    'application/x-www-form-urlencoded'
+}
+
+let BUFFER_THRESHOLD = 1024*64
+
+pub class HttpConnection {
+    __conn:      Int
+    __addr:      String
+    __port:      Int
+    __busy:      Bool
+    __ctx:       llhttp_internal
+    __settings:  llhttp_settings
+    __closures:  Array[_]
+    __chunk:     Blob
+    __buf:       Blob
+    __multipart: _
+    __state:     Int
+    __header:    String | nil
+    __request:   HttpRequest
+
+    init(conn: Int, addr: String, port: Int) {
+        __conn     = conn
+        __addr     = addr
+        __port     = port
+        __busy     = false
+        __settings = llhttp_settings()
+        __ctx      = llhttp_internal()
+        __closures = []
+        __chunk    = Blob()
+        __buf      = Blob()
+
+        llhttp_settings_init(__settings)
+
+        __install('on_protocol',     c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_url',          c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_status',       c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_method',       c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_version',      c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_header_field', c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_header_value', c.int, c.ptr, c.ptr, c.u64, self.onData)
+        __install('on_body',         c.int, c.ptr, c.ptr, c.u64, self.onData)
+
+        __install('on_message_begin',         c.int, c.ptr, self.onMessageBegin)
+        __install('on_url_complete',          c.int, c.ptr, self.onURLComplete)
+        __install('on_status_complete',       c.int, c.ptr, self.onStatusComplete)
+        __install('on_method_complete',       c.int, c.ptr, self.onMethodComplete)
+        __install('on_version_complete',      c.int, c.ptr, self.onVersionComplete)
+        __install('on_header_field_complete', c.int, c.ptr, self.onHeaderFieldComplete)
+        __install('on_header_value_complete', c.int, c.ptr, self.onHeaderValueComplete)
+        __install('on_headers_complete',      c.int, c.ptr, self.onHeadersComplete)
+        __install('on_message_complete',      c.int, c.ptr, self.onMessageComplete)
+
+        llhttp_init(__ctx, HTTP_REQUEST, __settings)
+    }
+
+    __install(member, *args) {
+        __closures.push(
+            (__settings.{member} = c.closure(*args))
+        )
+    }
+
+    __data!() -> String {
+        let data = __buf.str!()
+        __buf.clear()
+        data
+    }
+
+    __request-ready? -> Bool {
+        if __state == states.FINISHED {
+            return true
+        }
+        if __state == states.MULTIPART {
+            return false
+        }
+        if (
+            (__ctx.flags & F_CONTENT_LENGTH)
+         && (__ctx.content_length <= BUFFER_THRESHOLD)
+        ) {
+            return false
+        }
+        if (__request.headers['Content-Type'] in ALWAYS_BUFFER) {
+            return false
+        }
+        true
+    }
+
+    __begin-serve() {
+        __busy = true
+        __request.begin()
+        __request
+    }
+
+    onMessageBegin(parser) {
+        __state   = states.STARTED
+        __request = HttpRequest(self)
+        HPE_OK
+    }
+
+    onHeaderFieldComplete(parser) {
+        if #__request.headers < limits.MAX_HEADERS {
+            __header = __data!()
+            HPE_OK
+        } else {
+            HPE_USER
+        }
+    }
+
+    onHeaderValueComplete(parser) {
+        let value = __data!()
+        let headers = __request.headers
+        if let $field = __header {
+            match headers[field] {
+                nil => headers[field] = value,
+
+                vs: Array[String]
+                    => vs.push(value),
+
+                v => headers[field] = [v, value]
+            }
+        }
+        HPE_OK
+    }
+
+    onURLComplete(parser) {
+        __request.url = __data!()
+        HPE_OK
+    }
+
+    onMethodComplete(parser) {
+        __buf.clear()
+        HPE_OK
+    }
+
+    onVersionComplete(parser) {
+        __buf.clear()
+        HPE_OK
+    }
+
+    onStatusComplete(parser) {
+        __buf.clear()
+        HPE_OK
+    }
+
+    onData(parser, data, len) {
+        if #__buf >= limits.MAX_DATA_SIZE {
+            return HPE_USER
+        }
+
+        if __state == states.MULTIPART {
+            if not let Some(state) = (__multipart)(c.as_str(data, len)) {
+                return HPE_USER
+            }
+            match state {
+                MultipartData(form, files) => {
+                    __request.files.update(files)
+                    __request.params.update(form)
+                    __state = states.FINISHED
+                    return HPE_PAUSED
+                },
+
+                MultipartError => {
+                    return HPE_USER
+                },
+
+                MultipartMore => {
+                    ;
+                }
+            }
+        } else {
+            __buf.push(data, len)
+        }
+
+        HPE_OK
+    }
+
+    onHeadersComplete(parser) {
+        __request.method  = c.as_str(llhttp_method_name(llhttp_get_method(parser)))
+        __request.version = llhttp_get_version(parser)
+
+        match __request.headers['Content-Type'] {
+            /multipart\/form-data;\s*boundary=(.+)/ => {
+                __state = states.MULTIPART
+                __multipart = multipart($1)
+                (__multipart)()
+            },
+
+            _ => {
+                __state = states.HAVE_HEADERS
+            }
+        }
+
+        HPE_OK
+    }
+
+    onMessageComplete(parser) {
+        __request.body = __data!()
+        __request.finished = true
+        __state = states.FINISHED
+        HPE_PAUSED
+    }
+
+    push(chunk: String | Blob) -> Ok[HttpRequest | nil] | Err[Int] {
+        if __state == states.FINISHED {
+            reset(__conn, __addr, __port)
+        }
+
+        __chunk.push(chunk)
+
+        match llhttp_execute(__ctx, __chunk, #__chunk) {
+            HPE_PAUSED => do {
+                let pos = llhttp_get_error_pos(__ctx)
+                let idx = pos - __chunk.ptr()
+                __chunk.clear(0, idx)
+                Ok(__begin-serve())
+            },
+
+            HPE_OK => do {
+                __chunk.clear()
+                Ok(__request-ready? ?: __begin-serve())
+            },
+
+            err => Err(err)
+        }
+    }
+
+    reset(conn: Int, addr: String, port: Int) -> HttpConnection {
+        __conn   = conn
+        __addr   = addr
+        __port   = port
+        __busy   = false
+        __state  = states.STARTED
+        __header = nil
+        __buf.clear()
+        __chunk.clear()
+        llhttp_reset(__ctx)
+        self
+    }
+
+    destroy() {
+        if __ctx != nil {
+            c.free(__ctx)
+            c.free(__settings)
+            while __closures {
+                c.freeClosure(__closures.pop())
+            }
+        }
+        __ctx = cast(nil)
+    }
+
+    fd -> Int {
+        __conn
+    }
+
+    busy? -> Bool {
+        __busy
+    }
+
+    resume() {
+        __busy = false
+    }
+}
+
+pub fn statusName(code: Int) -> String {
+    c.as_str(llhttp_status_name(code))
+}

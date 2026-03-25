@@ -240,7 +240,8 @@ pub ns cg {
     pub const kEventFlagMaskSecondaryFn = 0x00800000
 
     pub const kEventFieldMouseSubtype  = 55
-    pub const kKeyboardEventKeycode   = 9
+    pub const kKeyboardEventAutorepeat = 8
+    pub const kKeyboardEventKeycode    = 9
 
     pub const kWindowListOptionAll             = 0
     pub const kWindowListOptionOnScreenOnly    = (1 << 0)

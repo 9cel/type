@@ -2,11 +2,11 @@
 
 import apple (..)
 import soundio (..)
-import clap (clap!)
 import path (Path)
 import json
 import ffi as c
-import os (signal, SIGINT, SIGTERM, exit)
+import os (signal, SIGINT, SIGTERM, SIGPIPE, exit, accept, read, write, close)
+import net (listen)
 import log (..)
 
 logging({level: INFO})
@@ -48,6 +48,11 @@ let WEB_KEY_TO_MAC = %{
 
 const APP_DIR = Path(__file__).parent
 
+fn sounds-dir() -> Path {
+    let installed = APP_DIR.parent / 'share' / 'clickity' / 'sounds';
+    return installed.exists? ? installed : (APP_DIR / 'sounds')
+}
+
 fn load-raw-f32(p: Path) -> Array[Float] {
     let blob = p.read-bytes()
     let n = #blob / 4
@@ -73,7 +78,7 @@ fn load-profile-raw(
     let all-u = []
 
     for name, def in cfg['definitions'] {
-        let mac-key = WEB_KEY_TO_MAC[name] ?? continue
+        let $mac-key = WEB_KEY_TO_MAC[name] or continue
         let timing: _ = def['timing']
 
         let ds = int(timing[0][0] * SAMPLE_RATE / 1000.0)
@@ -93,63 +98,51 @@ fn load-profile-raw(
     (downs, ups, all-d, all-u)
 }
 
-clap! List {
+fn profile-names() -> Array[String] {
+    [p.name for p in sounds-dir().ls() if p.dir?]
 }
 
-clap! Args {
-    /// Name of the click profile to use (corresponds to a directory in `sounds/`)
-    profile: String, pos: true
-    cmd list: List
-}
+let SOCK_DIR  = Path.home() / 'Library' / 'Application Support' / 'clickity'
+let SOCK_PATH = SOCK_DIR / 'clickity.sock'
+
+let audio-queue = SharedQueue()
+let playing: Array[{samples: Array[Float], pos: Int}] = []
 
 fn main() {
     if !accessibility-trusted?() {
-        eprint('Grant Accessibility permission, then re-run.')
-        exit(1)
-    }
-
-    let (args, _) = Args.parse()
-
-    let profiles = [p.name for p in (APP_DIR / 'sounds').ls() if p.dir?]
-
-    if args.cmd :: List {
-        for profiles {
-            print(it)
+        warn!('waiting for Accessibility permission...')
+        while !accessibility-trusted?(prompt?=false) {
+            os.sleep(5.0)
         }
-        exit(0)
+        info!('Accessibility permission granted')
     }
 
-    let name = args.profile ?? do {
-        let random = rand(profiles)
-        warn!("no profile specified, randomly selecting: {random}")
-        random
-    }
-
-    info!("starting...")
-
-    let dir = APP_DIR / 'sounds' / name
-    if !dir.exists? {
-        critical!("profile '{name}' not found in {APP_DIR}/sounds")
-        exit(1)
-    }
+    let profiles = profile-names()
+    let name = rand(profiles)
 
     info!("profile: {name}")
 
+    let dir = sounds-dir() / name
     let (down-clicks, up-clicks, all-downs, all-ups) = load-profile-raw(dir)
+    let current-profile = name
+    let active? = true
+    let volume = 1.0
+    let paused? = true
+    let want-pause? = false
+    let want-unpause? = false
 
     info!("loaded {#all-downs} down + {#all-ups} up clicks")
 
-    let queue = SharedQueue()
-    let playing: Array[{samples: Array[Float], pos: Int}] = []
-
     let cb-areas = c.box(c.ptr)
     let cb-count = c.box(c.int)
+
+    let prev-flags = 0
 
     fn on-write(stream-ptr: Ptr, frame-min: Int, frame-max: Int) {
         let stream = SoundIoOutStream(stream-ptr)
         let channels = stream.layout.channel_count
 
-        while let Some(samples) = queue.try-take(0) {
+        while let Some(samples) = audio-queue.try-take() {
             playing.push({samples, pos: 0})
         }
 
@@ -188,27 +181,37 @@ fn main() {
             soundio_outstream_end_write(stream-ptr)
             frames-left -= count
         }
+
+        if #playing == 0 && audio-queue.empty?() {
+            want-pause? = true
+        }
+
+        nil
     }
 
     fn trigger(keycode: Int, down?: Bool) {
+        if !active? {
+            return
+        }
         let pool     = down? ? down-clicks : up-clicks
         let fallback = down? ? all-downs   : all-ups
-        let samples = pool[keycode] ?? fallback[rand(#fallback)]
-        let vol = 0.8 + rand() * 0.2
-        queue.put([s * vol for s in samples])
+        let samples  = pool[keycode] ?? rand(fallback)
+        let vol      = volume * (0.8 + rand() * 0.2)
+        want-unpause? = true
+        audio-queue.put([it * vol for samples])
     }
-
-    let prev-flags = 0
 
     fn on-key(ev-type: Int, ev: CGEvent) {
         let keycode = ev.get-int(cg.kKeyboardEventKeycode)
         if ev-type == cg.kEventKeyDown {
-            trigger(keycode, true)
+            if ev.get-int(cg.kKeyboardEventAutorepeat) == 0 {
+                trigger(keycode, true)
+            }
         } else if ev-type == cg.kEventKeyUp {
             trigger(keycode, false)
         } else if ev-type == cg.kEventFlagsChanged {
-            let flags = ev.flags
-            let down? = (flags & ~prev-flags) != 0
+            let flags  = ev.flags
+            let down?  = (flags & ~prev-flags) != 0
             prev-flags = flags
             trigger(keycode, down?)
         }
@@ -229,19 +232,109 @@ fn main() {
     stream.set-write-callback(on-write)
     stream.open()
     stream.start()
+    stream.pause()
 
     let mask = (1 << cg.kEventKeyDown) | (1 << cg.kEventKeyUp) | (1 << cg.kEventFlagsChanged)
     let ^tap = EventTap(mask, on-key, options=cg.kEventTapOptionListenOnly)
 
+    fn handle-cmd(req: _) {
+        match req['cmd'] {
+            'on' => {
+                active? = true
+                tap.enable!()
+                return {ok: true}
+            },
+            'off' => {
+                active? = false
+                tap.disable!()
+                return {ok: true}
+            },
+            'switch' => {
+                if not let $pname = req['profile'] {
+                    return {ok: false, error: 'missing profile'}
+                }
+                let pdir = (sounds-dir() / pname)
+                if !pdir.exists? {
+                    return {ok: false, error: "unknown profile: {pname}"}
+                }
+                let (d, u, ad, au) = load-profile-raw(pdir)
+                down-clicks = d
+                up-clicks   = u
+                all-downs   = ad
+                all-ups     = au
+                current-profile = pname
+                info!("switched to profile: {pname}")
+                return {ok: true, profile: pname}
+            },
+            'volume' => {
+                if not let lvl: Int | Float = req['level'] {
+                    return {ok: false, error: 'missing level'}
+                }
+                if lvl < 0.0 || lvl > 100.0 {
+                    return {ok: false, error: 'level must be 0-100'}
+                }
+                volume = lvl / 100.0
+                info!("volume: {lvl}%")
+                return {ok: true, volume: lvl}
+            },
+            'status' => { return {ok: true, active: active?, profile: current-profile, volume: int(volume * 100)} },
+            'list'   => { return {ok: true, profiles: profile-names()} },
+            _        => { return {ok: false, error: 'unknown command'} }
+        }
+    }
+
+    let cmd-queue = SharedQueue()
+
+    fn serve-socket() {
+        SOCK_DIR.mkdir(parents=true, exist-ok=true)
+
+        if SOCK_PATH.exists? {
+            SOCK_PATH.unlink()
+        }
+
+        let server = listen('unix', str(SOCK_PATH))
+        info!("socket: {SOCK_PATH}")
+
+        for (;;) {
+            let (fd, _) = accept(server)
+            let data = read(fd, 4096)
+            let req = json::parse(data.str!())
+            let reply = SharedQueue()
+            cmd-queue.put({req, reply})
+            let response = reply.take()
+            write(fd, "{json::encode(response)}\n", all=true)
+            close(fd)
+        }
+    }
+
+    Thread(serve-socket)
+
     let stop? = false
     signal(SIGINT,  () -> (stop? = true))
     signal(SIGTERM, () -> (stop? = true))
+    signal(SIGPIPE, () -> do {})
 
-    info!('click: listening for keystrokes')
+    info!('listening for keystrokes')
     while !stop? {
+        while let Some({req, reply}) = cmd-queue.try-take() {
+            reply.put(handle-cmd(req))
+        }
+        if want-unpause? && paused? {
+            stream.unpause()
+            paused? = false
+            want-unpause? = false
+        }
+        if want-pause? && !paused? {
+            stream.pause()
+            paused? = true
+            want-pause? = false
+        }
         ctx.flush-events()
         run-loop.run(0.25)
     }
+
+    SOCK_PATH.unlink() if SOCK_PATH.exists?
+    info!('shutdown')
 }
 
 main()

@@ -1,0 +1,93 @@
+#!./bin/ty
+
+import net (dial)
+import os (read, write, close, exit)
+import clap (clap!)
+import json
+import path (Path)
+import chalk (chalk, hsl-gradient)
+
+let SOCK_PATH = Path.home() / 'Library' / 'Application Support' / 'clickity' / 'clickity.sock';
+
+clap! On {}
+clap! Off {}
+
+clap! Switch {
+    /// Sound profile name
+    profile: String, pos: true
+}
+
+clap! Volume {
+    /// Volume level (0-100)
+    level: Int, pos: true
+}
+
+clap! ListProfiles {}
+clap! Status {}
+
+clap! Args {
+    cmd on:     On
+    cmd off:    Off
+    cmd switch: Switch
+    cmd vol:    Volume
+    cmd list:   ListProfiles
+    cmd status: Status
+}
+
+fn send(req) -> _ {
+    try let fd = dial('unix', "{SOCK_PATH}") else {
+        eprint('clickityd is not running. Start it with: brew services start clickity')
+        exit(1)
+    }
+    write(fd, "{json::encode(req)}\n", all=true)
+    let data = read(fd, 4096)
+    close(fd)
+    json::parse!(data.str!())
+}
+
+fn main() {
+    let (args, _) = Args.parse()
+
+    let req = match args.cmd {
+        c: On           => ({cmd: 'on'}),
+        c: Off          => ({cmd: 'off'}),
+        c: Switch       => ({cmd: 'switch', profile: c.profile}),
+        c: Volume       => ({cmd: 'volume', level: c.level}),
+        c: ListProfiles => ({cmd: 'list'}),
+        c: Status       => ({cmd: 'status'}),
+        _ => do {
+            Args.parse(['clickity', '--help'])
+            unreachable!
+        }
+    }
+
+    let resp = send(req)
+
+    match resp {
+        {error, *} => {
+            print(chalk"[b bright red]error:[/] {error}")
+        },
+
+        {profiles, *} => {
+            print(chalk"[green]Available profiles:[/]")
+            for profiles {
+                print(chalk" [yellow]-[/] [blue]{it}[/]")
+            }
+        },
+
+        {active, profile, volume: (vol: Int | Float), *} => {
+            let vol-grad  = hsl-gradient((0.0, 0.6, 0.5), (0.3, 1.0, 0.7))
+            let vol-color = vol-grad(vol / 100.0)
+            print(
+                chalk"[yellow]Status:[/]\n"
+                     "  [green]active[/]:  [{active ? 'green' : 'red'}]{active}[/]\n"
+                     "  [green]profile[/]: [blue]{profile}[/]\n"
+                     "  [green]volume[/]:  [{vol-color}]{vol}%[/]"
+            )
+        },
+
+        _ => {}
+    }
+}
+
+main()

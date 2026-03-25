@@ -36,10 +36,19 @@ clickity off                         Disable sounds
 clickity switch cherrymx-blue-abs    Switch sound profile
 clickity vol 80                      Set volume (0-100)
 clickity list                        List available profiles
+clickity blacklist Chrome            Add an app to the blacklist (no sounds when it's active)
+clickity blacklist -d Chrome         Remove an app from the blacklist
 ```
 
 ## Profiles
 
-cherrymx-black-abs, cherrymx-black-pbt, cherrymx-blue-abs, cherrymx-blue-pbt, cherrymx-brown-abs, cherrymx-brown-pbt, cherrymx-red-abs, topre-purple-hybrid-pbt
+- cherrymx-black-abs
+- cherrymx-black-pbt
+- cherrymx-blue-abs
+- cherrymx-blue-pbt
+- cherrymx-brown-abs
+- cherrymx-brown-pbt
+- cherrymx-red-abs
+- topre-purple-hybrid-pbt
 
-Sound samples from the Mechvibes project.
+All ofthe sound samples are from the [Mechvibes project](http://mechvibes.com/).

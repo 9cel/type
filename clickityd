@@ -4,12 +4,47 @@ import apple (..)
 import soundio (..)
 import path (Path)
 import json
-import ffi as c
+import ffi as c (C!)
 import os (signal, SIGINT, SIGTERM, SIGPIPE, exit, accept, read, write, close)
 import net (listen)
 import log (..)
+import time
+
+use Config = {
+    profile:   String | nil,
+    volume:    Float
+    active:    Bool
+    blacklist: Array[String]
+}
 
 logging({level: INFO})
+
+C! fn {
+    int proc_name(int pid, void *buf, uint32_t size);
+}
+
+fn window-name(pid: Int) -> String {
+    let cache = static!(%{})
+    let buf   = static!(c.alloc(1024))
+
+    if let (name, when) = cache[pid] {
+        if time.now() - when < 60.0 {
+            debug!("cache hit for pid {pid}: {name}")
+            return name
+        } else {
+            cache[pid] = nil
+        }
+    }
+
+    let name = match proc_name(pid, buf, 1024) {
+        0 => '',
+        n => c.str(buf, n)
+    }
+
+    cache[pid] = (name, time.now())
+
+    name
+}
 
 let SAMPLE_RATE = 44100
 
@@ -49,8 +84,44 @@ let WEB_KEY_TO_MAC = %{
 const APP_DIR = Path(__file__).parent
 
 fn sounds-dir() -> Path {
-    let installed = APP_DIR.parent / 'share' / 'clickity' / 'sounds';
-    return installed.exists? ? installed : (APP_DIR / 'sounds')
+    let installed = APP_DIR.parent / 'share' / 'clickity' / 'sounds'
+    installed.exists? ? installed : (APP_DIR / 'sounds')
+}
+
+fn config-path() -> Path {
+    let installed = APP_DIR.parent / 'share' / 'clickity' / 'config.json'
+    let user      = Path.home() / '.config' / 'clickity' / 'config.json'
+    installed.exists? ? installed : user
+}
+
+fn load-config() -> Config {
+    let path = config-path()
+
+    if path.exists? {
+        try {
+            return json.parse(Config, path.read-text())
+        } catch err {
+            warn!("failed to load config: {err}")
+        }
+    }
+
+    return {
+        profile:   nil,
+        volume:    0.4,
+        active:    true,
+        blacklist: []
+    }
+}
+
+fn store-config(conf: Config) {
+    let path = config-path()
+
+    try {
+        path.parent.mkdir(parents=true, exist-ok=true)
+        path.write(json.encode(conf))
+    } catch err {
+        warn!("failed to store config: {err}")
+    }
 }
 
 fn load-raw-f32(p: Path) -> Array[Float] {
@@ -69,7 +140,7 @@ fn load-profile-raw(
     Array[Array[Float]],
     Array[Array[Float]]
 ) {
-    let cfg: _ = json::parse((dir / 'config.json').read-text())
+    let cfg: _ = json.parse((dir / 'config.json').read-text())
     let pcm = load-raw-f32(dir / 'sound.raw')
 
     let downs = %{}
@@ -110,7 +181,7 @@ let playing: Array[{samples: Array[Float], pos: Int}] = []
 
 fn main() {
     if !accessibility-trusted?() {
-        warn!('waiting for Accessibility permission...')
+        info!('waiting for Accessibility permission...')
         while !accessibility-trusted?(prompt?=false) {
             os.sleep(5.0)
         }
@@ -118,17 +189,24 @@ fn main() {
     }
 
     let profiles = profile-names()
-    let name = rand(profiles)
+    let config   = load-config()
 
-    info!("profile: {name}")
+    let profile = if let $name = config.profile and name in profiles {
+        name
+    } else {
+        warn!("using a random profile")
+        rand(profiles)
+    }
 
-    let dir = sounds-dir() / name
-    let (down-clicks, up-clicks, all-downs, all-ups) = load-profile-raw(dir)
-    let current-profile = name
-    let active? = true
-    let volume = 1.0
-    let paused? = true
-    let want-pause? = false
+    info!("profile: {profile}")
+
+    let sounds = sounds-dir() / profile
+    let (downs, ups, all-downs, all-ups) = load-profile-raw(sounds)
+
+    let active?       = config.active
+    let volume        = config.volume
+    let paused?       = true
+    let want-pause?   = false
     let want-unpause? = false
 
     info!("loaded {#all-downs} down + {#all-ups} up clicks")
@@ -193,15 +271,24 @@ fn main() {
         if !active? {
             return
         }
-        let pool     = down? ? down-clicks : up-clicks
-        let fallback = down? ? all-downs   : all-ups
+        let pool     = down? ? downs     : ups
+        let fallback = down? ? all-downs : all-ups
         let samples  = pool[keycode] ?? rand(fallback)
         let vol      = volume * (0.8 + rand() * 0.2)
         want-unpause? = true
         audio-queue.put([it * vol for samples])
     }
 
+    let blacklist = config.blacklist
+
     fn on-key(ev-type: Int, ev: CGEvent) {
+        let pid  = ev.get-int(cg.kEventTargetUnixProcessID)
+        let name = window-name(pid)
+
+        if blacklist.any?(\_ in name) {
+            return ev
+        }
+
         let keycode = ev.get-int(cg.kKeyboardEventKeycode)
         if ev-type == cg.kEventKeyDown {
             if ev.get-int(cg.kKeyboardEventAutorepeat) == 0 {
@@ -237,6 +324,12 @@ fn main() {
     let mask = (1 << cg.kEventKeyDown) | (1 << cg.kEventKeyUp) | (1 << cg.kEventFlagsChanged)
     let ^tap = EventTap(mask, on-key, options=cg.kEventTapOptionListenOnly)
 
+    fn save-config() {
+        let conf: Config = {profile, volume, active: active?, blacklist}
+        store-config(conf)
+        info!("updated config: {conf}")
+    }
+
     fn handle-cmd(req: _) {
         match req['cmd'] {
             'on' => {
@@ -250,21 +343,25 @@ fn main() {
                 return {ok: true}
             },
             'switch' => {
-                if not let $pname = req['profile'] {
+                if not let $name = req['profile'] {
                     return {ok: false, error: 'missing profile'}
                 }
-                let pdir = (sounds-dir() / pname)
-                if !pdir.exists? {
-                    return {ok: false, error: "unknown profile: {pname}"}
+                let sounds = (sounds-dir() / name)
+                if !sounds.exists? {
+                    return {ok: false, error: "unknown profile: {name}"}
                 }
-                let (d, u, ad, au) = load-profile-raw(pdir)
-                down-clicks = d
-                up-clicks   = u
-                all-downs   = ad
-                all-ups     = au
-                current-profile = pname
-                info!("switched to profile: {pname}")
-                return {ok: true, profile: pname}
+                try {
+                    let (d, u, ad, au) = load-profile-raw(sounds)
+                    downs       = d
+                    ups         = u
+                    all-downs   = ad
+                    all-ups     = au
+                    profile     = name
+                    info!("switched to profile: {name}")
+                    return {ok: true, profile: name}
+                } catch err {
+                    return {ok: false, error: "failed to load profile: {err}"}
+                }
             },
             'volume' => {
                 if not let lvl: Int | Float = req['level'] {
@@ -277,9 +374,51 @@ fn main() {
                 info!("volume: {lvl}%")
                 return {ok: true, volume: lvl}
             },
-            'status' => { return {ok: true, active: active?, profile: current-profile, volume: int(volume * 100)} },
-            'list'   => { return {ok: true, profiles: profile-names()} },
-            _        => { return {ok: false, error: 'unknown command'} }
+            'blacklist' => {
+                if not let what: String = req['what'] {
+                    return {ok: false, error: 'missing name pattern'}
+                }
+
+                let added   = nil
+                let removed = nil
+
+                if !req['delete'] {
+                    if what not in blacklist {
+                        blacklist.push(what)
+                        added = what
+                        info!("added to blacklist: {what}")
+                    }
+                } else {
+                    if let $i = blacklist.search(what) {
+                        blacklist.pop(i)
+                        removed = what
+                        info!("removed from blacklist: {what}")
+                    }
+                }
+
+                return {ok: true, added, removed}
+            },
+            'status' => {
+                return {
+                    ok: true,
+                    active: active?,
+                    profile,
+                    volume: int(volume * 100),
+                    blacklist
+                }
+            },
+            'list' => {
+                return {
+                    ok: true,
+                    profiles
+                }
+            },
+            _ => {
+                return {
+                    ok: false,
+                    error: 'unknown command'
+                }
+            }
         }
     }
 
@@ -298,26 +437,28 @@ fn main() {
         for (;;) {
             let (fd, _) = accept(server)
             let data = read(fd, 4096)
-            let req = json::parse(data.str!())
+            let req = json.parse(data.str!())
             let reply = SharedQueue()
             cmd-queue.put({req, reply})
             let response = reply.take()
-            write(fd, "{json::encode(response)}\n", all=true)
+            write(fd, "{json.encode(response)}\n", all=true)
             close(fd)
         }
     }
 
-    Thread(serve-socket)
+    let server = Thread(serve-socket)
+    let stop?  = false
 
-    let stop? = false
     signal(SIGINT,  () -> (stop? = true))
     signal(SIGTERM, () -> (stop? = true))
     signal(SIGPIPE, () -> do {})
 
     info!('listening for keystrokes')
+
     while !stop? {
         while let Some({req, reply}) = cmd-queue.try-take() {
             reply.put(handle-cmd(req))
+            save-config()
         }
         if want-unpause? && paused? {
             stream.unpause()
@@ -336,6 +477,7 @@ fn main() {
     if SOCK_PATH.exists? {
         SOCK_PATH.unlink()
     }
+
     info!('shutdown')
 }
 

@@ -8,9 +8,24 @@ Plays mechanical keyboard click sounds when you type on macOS. Runs as a backgro
 brew tap 9cel/tap
 brew install clickity
 brew services start clickity
+# Grant Accessibility permission as described below
+
+# If it doesn't work immediately after granting permission, restart the service:
+brew services restart clickity
 ```
 
+### Accessibility Permission
+
 You'll need to grant Accessibility permission to the `ty` binary. On first launch, open System Settings > Privacy & Security > Accessibility, hit +, press Cmd+Shift+G, and paste the path shown in `brew info clickity`.
+
+### Dependencies
+
+
+You may need to install libyaml and libsoundio:
+
+```
+brew install libyaml libsoundio
+```
 
 ## Usage
 

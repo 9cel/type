@@ -333,7 +333,9 @@ fn main() {
         run-loop.run(0.25)
     }
 
-    SOCK_PATH.unlink() if SOCK_PATH.exists?
+    if SOCK_PATH.exists? {
+        SOCK_PATH.unlink()
+    }
     info!('shutdown')
 }
 

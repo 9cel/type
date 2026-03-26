@@ -18,15 +18,6 @@ brew services restart clickity
 
 You'll need to grant Accessibility permission to the `ty` binary. On first launch, open System Settings > Privacy & Security > Accessibility, hit +, press Cmd+Shift+G, and paste the path shown in `brew info clickity`.
 
-### Dependencies
-
-
-You may need to install libyaml and libsoundio:
-
-```
-brew install libyaml libsoundio
-```
-
 ## Usage
 
 ```
@@ -51,4 +42,4 @@ clickity blacklist -d Chrome         Remove an app from the blacklist
 - cherrymx-red-abs
 - topre-purple-hybrid-pbt
 
-All ofthe sound samples are from the [Mechvibes project](http://mechvibes.com/).
+All of the sound samples are from the [Mechvibes project](http://mechvibes.com/).

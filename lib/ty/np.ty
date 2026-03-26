@@ -41,7 +41,11 @@ pub ns raw {
     }
 
 #|if __apple__
-    C! lib fn {
+
+    const vDSP_Length = c.ulong;
+    const vDSP_Stride = c.long;
+
+    C! pub lib fn {
         void vDSP_vmulD(const double *A, long IA, const double *B, long IB, double *C, long IC, unsigned long N);
         void vDSP_vdivD(const double *B, long IB, const double *A, long IA, double *C, long IC, unsigned long N);
         void vDSP_vsaddD(const double *A, long IA, const double *B, double *C, long IC, unsigned long N);
@@ -84,6 +88,15 @@ pub ns raw {
         void vDSP_mmov(const float *A, float *C, unsigned long M, unsigned long N, unsigned long TA, unsigned long TC);
         void vDSP_vma(const float *A, long IA, const float *B, long IB, const float *C, long IC, float *D, long ID, unsigned long N);
         void vDSP_vmsb(const float *A, long IA, const float *B, long IB, const float *C, long IC, float *D, long ID, unsigned long N);
+        void vDSP_vclip(const float *A, long IA, const float *lo, const float *hi, float *C, long IC, unsigned long N);
+        void vDSP_minv(const float *A, long IA, float *C, unsigned long N);
+        void vDSP_vabs(const float *A, long IA, float *C, long IC, unsigned long N);
+        void vDSP_vfill(const float *A, float *C, long IC, unsigned long N);
+        void vDSP_vramp(const float *A, const float *B, float *C, long IC, unsigned long N);
+        void vDSP_vsmsa(const float *A, long IA, const float *B, const float *C, float *D, long ID, unsigned long N);
+        void vDSP_vintb(const float *A, long IA, const float *B, long IB, const float *C, float *D, long ID, unsigned long N);
+        void vDSP_vtabi(const float *A, long IA, const float *S1, const float *S2, const float *C, unsigned long M, float *D, long ID, unsigned long N);
+        void vDSP_vlint(const float *__A, const float *__B, vDSP_Stride __IB, float *__C, vDSP_Stride __IC, vDSP_Length __N, vDSP_Length __M);
         void vDSP_zvmul(const void *A, long IA, const void *B, long IB, const void *C, long IC, unsigned long N, int conjugate);
 
         void *vDSP_create_fftsetup(unsigned long log2n, int radix);
@@ -1340,14 +1353,18 @@ pub class F32Array {
     data: Ptr[Float]
     n: Int
 
+    __sp: Ptr[Float]
+
     init(size: Int) {
         data = c.new-auto(c.float, size)
-        n = size
+        n    = size
+        __sp = c.box-auto(c.float, 0.0)
     }
 
     init(ptr: Ptr[Float], size: Int) {
-        data = ptr
+        data = ptr.as(c.float)
         n = size
+        __sp = c.box-auto(c.float, 0.0)
     }
 
     #() -> Int { n }
@@ -1378,10 +1395,13 @@ pub class F32Array {
 
     scale!(s: Float) {
 #|if __apple__
-        let sp = c.box-auto(c.float, s)
-        raw.vDSP_vsmul(data, 1, sp, data, 1, n)
+        __sp[0] = s
+        raw.vDSP_vsmul(data, 1, __sp, data, 1, n)
 #|else
-        for i in ..n { let v = c.load(c.float, data + i); c.store(c.float, data + i, v * s) }
+        for i in ..n {
+            let v = c.load(c.float, data + i);
+            c.store(c.float, data + i, v * s)
+        }
 #|]
     }
 

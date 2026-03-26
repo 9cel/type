@@ -918,7 +918,7 @@ const ZSH_COMPLETION_TEMPLATE = ety.compile(
     <% } %>
     }
 
-    <%= funcName %> "$@"
+    compdef <%= funcName %> <%= prog %>
     ''',
     ['funcName', 'argSpecs', 'subcmds', 'prog']
 )

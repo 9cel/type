@@ -32,7 +32,7 @@ fn c::as_str(ptr: IntoPtr[Any], len: ?Int) -> String;
 fn c::load[T](type: CType[T], address: IntoPtr[T]) -> T;
 fn c::size[T](type: CType[T]) -> Int;
 fn c::free(ptr: IntoPtr[Any]) -> nil;
-fn c::new[T](type: CType[T], count: ?Int) -> Ptr[T];
+fn c::new[T](type: CType[T], count: ?Int, init: ?IntoPtr[Any]) -> Ptr[T];
 fn c::box[T](type: CType[T], val: ?T) -> Ptr[T];
 fn c::alloc[T](size: Int) -> Ptr[T];
 fn ptr::typed[T](ptr: Ptr[Any], type: CType[T]) -> Ptr[T];
@@ -82,6 +82,8 @@ macro __unpack-types! $$[
     }
 $$]
 
+fn c::pack(fmt: String, *args: Any) -> Ptr[Any];
+fn c::pack[T](buf: T, fmt: String, *args: Any) -> T;
 fn c::unpack[T](fmt: T, buf: IntoPtr[Any], off: Int = 0) -> __unpack-types!(T);
 
 pub __tls::_cif_cache: _ = nil

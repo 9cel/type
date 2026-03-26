@@ -1,20 +1,32 @@
 #!./bin/ty
 
 import apple (..)
-import soundio (..)
 import path (Path)
 import json
 import ffi as c (C!)
-import os (signal, SIGINT, SIGTERM, SIGPIPE, exit, accept, read, write, close)
+import os (signal, SIGINT, SIGTERM, SIGPIPE, exit, accept, read, write, close, sleep)
 import net (listen)
 import log (..)
 import time
+import np
+import vorbis
 
 use Config = {
     profile:   String | nil,
     volume:    Float
     active:    Bool
     blacklist: Array[String]
+}
+
+use Voice = {
+    ptr: Ptr[Float],
+    len: Int,
+    pos: Int
+}
+
+C! struct ClickSound {
+    float *ptr;
+    int len;
 }
 
 logging({level: INFO})
@@ -27,9 +39,10 @@ fn window-name(pid: Int) -> String {
     let cache = static!(%{})
     let buf   = static!(c.alloc(1024))
 
+    let now = time.now()
+
     if let (name, when) = cache[pid] {
-        if time.now() - when < 60.0 {
-            debug!("cache hit for pid {pid}: {name}")
+        if now - when < 60.0 {
             return name
         } else {
             cache[pid] = nil
@@ -37,11 +50,11 @@ fn window-name(pid: Int) -> String {
     }
 
     let name = match proc_name(pid, buf, 1024) {
-        0 => '',
-        n => c.str(buf, n)
+        n: n > 0 => c.str(buf, n),
+        _        => ''
     }
 
-    cache[pid] = (name, time.now())
+    cache[pid] = (name, now)
 
     name
 }
@@ -124,24 +137,52 @@ fn store-config(conf: Config) {
     }
 }
 
-fn load-raw-f32(p: Path) -> Array[Float] {
-    let blob = p.read-bytes()
-    let n = #blob / 4
-    let fmt: _ = "{n}f"
-    let tup: _ = c.unpack(fmt, blob)
-    [tup[i] for i in ..n]
+fn mono-to-stereo(src: ClickSound) -> ClickSound {
+    let stereo = src.len * 2
+    let ptr    = c.new(c.float, stereo)
+    let one    = static!(c.box(c.float, 1.0))
+
+    np.raw.vDSP_vsmul(src.ptr, 1, one, ptr,     2, src.len)
+    np.raw.vDSP_vsmul(src.ptr, 1, one, ptr + 1, 2, src.len)
+
+    ClickSound(ptr=ptr, len=stereo)
 }
 
-fn load-profile-raw(
+fn prepare-click(mono: ClickSound, vol: Float, pitch: Float) -> Ptr[_] {
+    let out-len = int(mono.len / pitch)
+    let buf     = c.new(c.float, out-len)
+    let idx     = c.new(c.float, out-len)
+
+    for i in ..out-len {
+        idx[i] = i * pitch
+    }
+
+    np.raw.vDSP_vlint(mono.ptr, idx, 1, buf, 1, out-len, mono.len)
+    c.free(idx)
+
+    let stereo-len = out-len * 2
+    let ptr        = c.new(c.float, stereo-len)
+    let sp         = static!(c.box(c.float))
+
+    sp[0] = vol
+    np.raw.vDSP_vsmul(buf, 1, sp, ptr,     2, out-len)
+    np.raw.vDSP_vsmul(buf, 1, sp, ptr + 1, 2, out-len)
+    c.free(buf)
+
+    c.pack('qi', ptr, stereo-len)
+}
+
+fn load-profile(
     dir: Path
 ) -> (
-    Dict[Int, Array[Float]],
-    Dict[Int, Array[Float]],
-    Array[Array[Float]],
-    Array[Array[Float]]
+    Dict[Int, ClickSound],
+    Dict[Int, ClickSound],
+    Array[ClickSound],
+    Array[ClickSound]
 ) {
     let cfg: _ = json.parse((dir / 'config.json').read-text())
-    let pcm = load-raw-f32(dir / 'sound.raw')
+
+    let all-pcm = vorbis.read-mono(dir / 'sound.ogg')
 
     let downs = %{}
     let ups   = %{}
@@ -157,8 +198,15 @@ fn load-profile-raw(
         let us = int(timing[1][0] * SAMPLE_RATE / 1000.0)
         let ue = int(timing[1][1] * SAMPLE_RATE / 1000.0)
 
-        let d = pcm[ds;de]
-        let u = pcm[us;ue]
+        fn slice(src: vorbis.OggAudio, from: Int, to: Int) -> ClickSound {
+            let len = to - from
+            let ptr = src.ptr.as(c.float)
+            let new = c.new(c.float, len, ptr + from)
+            ClickSound(ptr=new, len=len)
+        }
+
+        let d = slice(all-pcm, ds, de)
+        let u = slice(all-pcm, us, ue)
 
         downs[mac-key] = d
         ups[mac-key]   = u
@@ -176,16 +224,14 @@ fn profile-names() -> Array[String] {
 let SOCK_DIR  = Path.home() / 'Library' / 'Application Support' / 'clickity'
 let SOCK_PATH = SOCK_DIR / 'clickity.sock'
 
-let audio-queue = SharedQueue()
-let playing: Array[{samples: Array[Float], pos: Int}] = []
+let voice-queue: SharedQueue[Ptr[_]] = SharedQueue()
+
+let _snd = ClickSound()
 
 fn main() {
     if !accessibility-trusted?() {
-        info!('waiting for Accessibility permission...')
-        while !accessibility-trusted?(prompt?=false) {
-            os.sleep(5.0)
-        }
-        info!('Accessibility permission granted')
+        os.sleep(3.0)
+        exit(1)
     }
 
     let profiles = profile-names()
@@ -201,71 +247,71 @@ fn main() {
     info!("profile: {profile}")
 
     let sounds = sounds-dir() / profile
-    let (downs, ups, all-downs, all-ups) = load-profile-raw(sounds)
+    let (downs, ups, all-downs, all-ups) = load-profile(sounds)
 
-    let active?       = config.active
-    let volume        = config.volume
-    let paused?       = true
-    let want-pause?   = false
-    let want-unpause? = false
+    let active? = config.active
+    let volume  = config.volume
 
-    info!("loaded {#all-downs} down + {#all-ups} up clicks")
+    info!("loaded {#all-downs} down + {#all-ups} up clicks (mono, pitch-shifted per keystroke)")
 
-    let cb-areas = c.box(c.ptr)
-    let cb-count = c.box(c.int)
+    let lo = c.box(c.float, -1.0)
+    let hi = c.box(c.float,  1.0)
+
+    let render = fn (buf: Ptr[_], frames: Int, channels: Int) {
+        let vptrs: Array[Ptr] = static!([])
+        let vlens: Array[Int] = static!([])
+        let voffs: Array[Int] = static!([])
+        let n-samp = frames * channels
+
+        while let Some(p-snd) = voice-queue.try-take() {
+            let ptr = c.load(c.ptr, p-snd).as(c.float)
+            let len = c.load(c.int, p-snd.as(c.u8) + 8)
+            c.free(p-snd)
+            vptrs.push(ptr)
+            vlens.push(len)
+            voffs.push(0)
+        }
+
+        np.raw.vDSP_vclr(buf, 1, n-samp)
+
+        let j = 0
+        while j < #vptrs {
+            let remaining = vlens[j] - voffs[j]
+            let consume   = min(n-samp, remaining)
+
+            np.raw.vDSP_vadd(buf, 1, vptrs[j] + voffs[j], 1, buf, 1, consume)
+
+            if (voffs[j] += consume) == vlens[j] {
+                c.free(vptrs.pop(j))
+                vlens.pop(j)
+                voffs.pop(j)
+            } else {
+                j++
+            }
+        }
+
+        np.raw.vDSP_vclip(buf, 1, lo, hi, buf, 1, n-samp)
+    }
+
+    fn make-output() -> AudioOutput {
+        let fmt = audio.pcm-format(
+            sample-rate=SAMPLE_RATE as Float,
+            channels=2,
+            bits=32
+        )
+        let hw = audio.device-buffer-frame-size()
+        info!("audio: AudioUnit ({SAMPLE_RATE}Hz, float32, stereo, {hw} frames/callback)")
+        let au = AudioOutput(format=fmt, render=render)
+        au.start!()
+        au
+    }
+
+    let ^au = make-output()
+
+    let device-change-queue = SharedQueue()
+    let ^device-listener = audio.DeviceListener(queue=device-change-queue)
 
     let prev-flags = 0
-
-    fn on-write(stream-ptr: Ptr, frame-min: Int, frame-max: Int) {
-        let stream = SoundIoOutStream(stream-ptr)
-        let channels = stream.layout.channel_count
-
-        while let Some(samples) = audio-queue.try-take() {
-            playing.push({samples, pos: 0})
-        }
-
-        let frames-left = frame-max
-        while frames-left > 0 {
-            cb-count[0] = frames-left
-
-            if soundio_outstream_begin_write(stream-ptr, cb-areas, cb-count) != 0 {
-                return
-            }
-
-            let count = cb-count[0]
-            let areas = cb-areas[0]
-
-            break if count == 0
-
-            for frame in ..count {
-                let sample = 0.0
-
-                let i = 0
-                while i < #playing {
-                    if playing[i].pos < #playing[i].samples {
-                        sample += playing[i].samples[playing[i].pos]
-                        playing[i].pos += 1
-                        i += 1
-                    } else {
-                        playing.pop(i)
-                    }
-                }
-
-                for ch in ..channels {
-                    write-sample-float32(areas, ch, frame, sample)
-                }
-            }
-
-            soundio_outstream_end_write(stream-ptr)
-            frames-left -= count
-        }
-
-        if #playing == 0 && audio-queue.empty?() {
-            want-pause? = true
-        }
-
-        nil
-    }
 
     fn trigger(keycode: Int, down?: Bool) {
         if !active? {
@@ -273,23 +319,32 @@ fn main() {
         }
         let pool     = down? ? downs     : ups
         let fallback = down? ? all-downs : all-ups
-        let samples  = pool[keycode] ?? rand(fallback)
+        let src      = pool[keycode] ?? rand(fallback)
         let vol      = volume * (0.8 + rand() * 0.2)
-        want-unpause? = true
-        audio-queue.put([it * vol for samples])
+        let pitch    = 0.9 + rand() * 0.2
+        voice-queue.put(prepare-click(src, vol, pitch))
     }
 
     let blacklist = config.blacklist
 
-    fn on-key(ev-type: Int, ev: CGEvent) {
-        let pid  = ev.get-int(cg.kEventTargetUnixProcessID)
-        let name = window-name(pid)
+    let block?   = false
+    let last-pid = -1
 
-        if blacklist.any?(\_ in name) {
+    fn on-key(ev-type: Int, ev: CGEvent) {
+        let pid = ev.get-int(cg.kEventTargetUnixProcessID)
+
+        if pid != last-pid {
+            let name = window-name(pid)
+            block?   = blacklist.any?(\_ in name)
+            last-pid = pid
+        }
+
+        if block? {
             return ev
         }
 
         let keycode = ev.get-int(cg.kKeyboardEventKeycode)
+
         if ev-type == cg.kEventKeyDown {
             if ev.get-int(cg.kKeyboardEventAutorepeat) == 0 {
                 trigger(keycode, true)
@@ -302,26 +357,14 @@ fn main() {
             prev-flags = flags
             trigger(keycode, down?)
         }
+
         ev
     }
 
-    let ^ctx = Context()
-    ctx.connect()
-    ctx.flush-events()
+    let mask = (1 << cg.kEventKeyDown)
+             | (1 << cg.kEventKeyUp)
+             | (1 << cg.kEventFlagsChanged)
 
-    let ^device = ctx.default-output-device
-    info!("output: {device.name}")
-
-    let ^stream = OutStream(device)
-    stream.format = SoundIoFormatFloat32NE
-    stream.sample-rate = SAMPLE_RATE
-    stream.software-latency = 0.01
-    stream.set-write-callback(on-write)
-    stream.open()
-    stream.start()
-    stream.pause()
-
-    let mask = (1 << cg.kEventKeyDown) | (1 << cg.kEventKeyUp) | (1 << cg.kEventFlagsChanged)
     let ^tap = EventTap(mask, on-key, options=cg.kEventTapOptionListenOnly)
 
     fn save-config() {
@@ -346,12 +389,15 @@ fn main() {
                 if not let $name = req['profile'] {
                     return {ok: false, error: 'missing profile'}
                 }
+                if name == 'random' {
+                    name = rand(profiles)
+                }
                 let sounds = (sounds-dir() / name)
                 if !sounds.exists? {
                     return {ok: false, error: "unknown profile: {name}"}
                 }
                 try {
-                    let (d, u, ad, au) = load-profile-raw(sounds)
+                    let (d, u, ad, au) = load-profile(sounds)
                     downs       = d
                     ups         = u
                     all-downs   = ad
@@ -460,18 +506,13 @@ fn main() {
             reply.put(handle-cmd(req))
             save-config()
         }
-        if want-unpause? && paused? {
-            stream.unpause()
-            paused? = false
-            want-unpause? = false
+        if let Some(_) = device-change-queue.try-take() {
+            device-change-queue.clear()
+            info!("audio device changed, rebuilding output")
+            au.close()
+            au = make-output()
         }
-        if want-pause? && !paused? {
-            stream.pause()
-            paused? = true
-            want-pause? = false
-        }
-        ctx.flush-events()
-        run-loop.run(0.25)
+        run-loop.run(0.125)
     }
 
     if SOCK_PATH.exists? {
